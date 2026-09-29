@@ -1,0 +1,10 @@
+node_modules/
+dist/
+ui/dist/
+.env
+.env.local
+*.log
+
+# Laufzeitdaten und lokale Arbeitsordner
+data/runtime/
+data/workspace/

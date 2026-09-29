@@ -1,0 +1,34 @@
+{
+  "channel_name": "Mein Dokumentarkanal",
+  "default_language": "de",
+  "preferred_aspect_ratio": "16:9",
+  "preferred_resolution": "2560x1440",
+  "visual_style": "CINEMATIC_DOCUMENTARY",
+  "preferred_color_moods": [
+    "deep teal & amber",
+    "candle gold on near-black",
+    "cold blue vs warm ember"
+  ],
+  "preferred_text_style": "kurz, deutsch, großbuchstaben, hoher kontrast, maximal 5 Wörter",
+  "preferred_font": "Inter ExtraBold, Arial Black, sans-serif",
+  "preferred_text_position": "AUTO",
+  "preferred_thumbnail_density": "low",
+  "preferred_subject_size": "large",
+  "brand_rules": [
+    "Ein einziger klarer Hauptfokus pro Thumbnail",
+    "Kinematografisches Licht, keine flache Ausleuchtung",
+    "Hoher Kontrast zwischen Motiv und Hintergrund",
+    "Immer eine bewusste textfreie Fläche vorsehen"
+  ],
+  "forbidden_elements": [
+    "Stockfoto-Ästhetik",
+    "plastische, überglänzende AI-Gesichter",
+    "zufällige Partikel und unmotivierter Nebel",
+    "überall Gold",
+    "billige Sci-Fi-Optik",
+    "chaotische Hintergründe mit vielen Kleinobjekten",
+    "irreführende Tatsachenbehauptungen"
+  ],
+  "text_mode": "LOCAL_OVERLAY",
+  "max_text_words": 5
+}

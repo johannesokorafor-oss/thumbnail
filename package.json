@@ -1,0 +1,57 @@
+{
+  "name": "thumbnail-studio",
+  "version": "1.0.0",
+  "description": "Automatische professionelle YouTube-Thumbnail-Erstellung aus fertigen Skripten",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n SERVER,UI -c blue,magenta \"npm:dev:server\" \"npm:dev:ui\"",
+    "dev:server": "tsx watch src/index.ts",
+    "dev:ui": "vite --config ui/vite.config.ts ui",
+    "build": "tsc --noEmit && vite build --config ui/vite.config.ts ui",
+    "start": "npm run build && tsx src/index.ts",
+    "start:server": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "tsx scripts/e2e.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johannesokorafor-oss/thumbnail.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/johannesokorafor-oss/thumbnail/issues"
+  },
+  "homepage": "https://github.com/johannesokorafor-oss/thumbnail#readme",
+  "dependencies": {
+    "chokidar": "^5.0.0",
+    "dotenv": "^18.0.4",
+    "express": "^5.2.1",
+    "openai": "^7.25.0",
+    "sharp": "^0.35.5",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^10.0.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
+  },
+  "type": "module",
+  "private": true
+}
