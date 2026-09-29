@@ -25,6 +25,28 @@ export type TextPosition =
   | 'BOTTOM_TEXT'
   | 'CENTER_TEXT';
 
+/** Distinct visual strategies — each must yield a genuinely different picture. */
+export type ThumbnailStrategy =
+  | 'SUBJECT_CLOSEUP'
+  | 'DRAMATIC_SCENE'
+  | 'MYSTERY_REVEAL'
+  | 'HUMAN_EMOTION'
+  | 'SYMBOLIC_METAPHOR'
+  | 'OBJECT_HERO'
+  | 'CONTRAST_SPLIT'
+  | 'SCALE_SHIFT';
+
+export const THUMBNAIL_STRATEGIES: ThumbnailStrategy[] = [
+  'SUBJECT_CLOSEUP',
+  'DRAMATIC_SCENE',
+  'MYSTERY_REVEAL',
+  'HUMAN_EMOTION',
+  'SYMBOLIC_METAPHOR',
+  'OBJECT_HERO',
+  'CONTRAST_SPLIT',
+  'SCALE_SHIFT',
+];
+
 export type StylePreset =
   | 'CINEMATIC_DOCUMENTARY'
   | 'PHOTOREALISTIC'
@@ -91,8 +113,12 @@ export interface DesignScore {
 export interface ThumbnailConcept {
   id: string;
   label: string;
+  /** The visual strategy this concept implements. */
+  strategy: ThumbnailStrategy;
   idea: string;
   subject: string;
+  /** Explicit emotional direction (expression, body language). */
+  emotion: string;
   action: string;
   environment: string;
   era: string;
@@ -124,26 +150,81 @@ export interface VariantCritique {
   overloaded: boolean;
   looksPremium: boolean;
   looksLikeRealThumbnail: boolean;
+  /** Does it feel distinctive or like generic AI/stock output? */
+  feelsGeneric: boolean;
+  /** Judged on the 320px version that is shown alongside the full image. */
+  smallSizeVerdict: string;
+  smallSizeReadable: boolean;
   visualContradictions: string[];
   anatomyOrPerspectiveErrors: string[];
   artifacts: string[];
+  /** Concrete, fixable defects — input for the refinement pass. */
+  defects: string[];
+  /** Can the defects be fixed by a targeted edit instead of a regeneration? */
+  fixableByEdit: boolean;
   titleImageConnection: string;
+  /** Structured reasoning, not just numbers. */
+  reasons: string[];
   score: DesignScore;
   scoreTotal: number;
   improvementPrompt: string;
   summary: string;
+  /** Was this produced from real image pixels by a vision model? */
+  source: 'vision-model' | 'deterministic-mock';
+}
+
+/** Result of the head-to-head visual comparison of all surviving candidates. */
+export interface VisualRanking {
+  order: number[];
+  winner: number;
+  reason: string;
+  perCandidate: Array<{ index: number; verdict: string }>;
+  source: 'vision-model' | 'deterministic-mock';
 }
 
 export interface GeneratedVariant {
   index: number;
   conceptId: string;
+  strategy?: ThumbnailStrategy;
   file: string;
   prompt: string;
+  /** What was actually delivered by the provider. */
   model: string;
   quality: string;
   size: string;
+  /** What was requested — kept separately so downgrades stay visible. */
+  requested?: { model: string; quality: string; size: string };
+  degradations?: Array<{ kind: string; requested: string; actual: string; reason: string }>;
+  latencyMs?: number;
+  /** Stage 1: deterministic local QA. */
+  localQa?: CandidateQaReport;
+  /** Stage 2: AI critique on the real pixels (only for Stage-1 survivors). */
   critique?: VariantCritique;
+  /** Set when the candidate was excluded from the final competition. */
+  rejected?: boolean;
+  rejectionReason?: string;
   iteration: number;
+  refined?: boolean;
+}
+
+/** Deterministic Stage-1 quality report for a single candidate. */
+export interface CandidateQaReport {
+  passed: boolean;
+  checks: QaCheck[];
+  metrics: {
+    width: number;
+    height: number;
+    aspect: number;
+    globalContrast: number;
+    safeAreaBusyness: number;
+    subjectSeparation: number;
+    clutter: number;
+    smallSizeDetailRetention: number;
+    borderArtifact: number;
+    meanLuminance: number;
+  };
+  /** Perceptual hash used to detect near-duplicate candidates. */
+  hash: string;
 }
 
 export interface CostEntry {
@@ -183,6 +264,22 @@ export interface Job {
   variants?: GeneratedVariant[];
   selectedVariant?: number;
   selectionReason?: string;
+  ranking?: VisualRanking;
+  /** Requested vs. actually used generation configuration. */
+  generation?: {
+    requestedModel: string;
+    actualModel: string;
+    requestedQuality: string;
+    actualQuality: string;
+    qualitySource: 'config' | 'quality-mode';
+    requestedSize: string;
+    actualSize: string;
+    premium: boolean;
+    degradations: Array<{ kind: string; requested: string; actual: string; reason: string }>;
+    provider: string;
+    testMode: boolean;
+  };
+  rejectedCount?: number;
   finalScore?: number;
   iterationCount: number;
   generationCount: number;
@@ -275,6 +372,16 @@ export interface ThumbnailAnalysisFile {
   size: string;
   generation_count: number;
   iteration_count: number;
+  candidates_generated: number;
+  candidates_rejected: number;
+  requested_model: string;
+  requested_quality: string;
+  requested_size: string;
+  quality_source: string;
+  premium_mode: boolean;
+  quality_degradations: Array<{ kind: string; requested: string; actual: string; reason: string }>;
+  visual_ranking: VisualRanking | null;
+  critique_source: string;
   final_score: number;
   estimated_cost_usd: number;
   cost_is_estimate: true;

@@ -31,11 +31,36 @@ export interface Job {
   generationCount: number;
   iterationCount: number;
   steps: { stage: string; label: string; at: string }[];
+  rejectedCount?: number;
+  /** Requested vs. actually used generation settings — never hidden from the user. */
+  generation?: {
+    requestedModel: string; actualModel: string;
+    requestedQuality: string; actualQuality: string; qualitySource: string;
+    requestedSize: string; actualSize: string;
+    premium: boolean; provider: string; testMode: boolean;
+    degradations: { kind: string; requested: string; actual: string; reason: string }[];
+  };
+  ranking?: {
+    order: number[]; winner: number; reason: string; source: string;
+    perCandidate: { index: number; verdict: string }[];
+  };
   variants?: {
     index: number; file: string; model: string; quality: string; size: string; conceptId: string;
-    critique?: { summary: string; scoreTotal: number; improvementPrompt: string };
+    rejected?: boolean; rejectionReason?: string; refined?: boolean; latencyMs?: number;
+    degradations?: { kind: string; requested: string; actual: string; reason: string }[];
+    localQa?: {
+      passed: boolean;
+      checks: { name: string; passed: boolean; detail: string }[];
+      metrics: Record<string, number>;
+      hash: string;
+    };
+    critique?: {
+      summary: string; scoreTotal: number; improvementPrompt: string;
+      reasons: string[]; defects: string[]; source: string;
+      smallSizeReadable: boolean; smallSizeVerdict: string; feelsGeneric: boolean;
+    };
   }[];
-  concepts?: { id: string; label: string; idea: string; textArea: string; thumbnailText: string; scoreTotal?: number; unusual: boolean }[];
+  concepts?: { id: string; label: string; strategy?: string; emotion?: string; idea: string; textArea: string; thumbnailText: string; scoreTotal?: number; unusual: boolean }[];
   analysis?: Record<string, unknown>;
   qa?: { passed: boolean; checks: { name: string; passed: boolean; detail: string }[] };
   error?: { message: string; stage: string; permanent: boolean };

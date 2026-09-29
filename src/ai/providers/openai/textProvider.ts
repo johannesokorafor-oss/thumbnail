@@ -60,9 +60,18 @@ export class OpenAITextProvider implements TextProvider {
   private buildInput(req: TextRequest) {
     const content: Array<Record<string, unknown>> = [{ type: 'input_text', text: req.user }];
     for (const img of req.images ?? []) {
-      if (!fs.existsSync(img)) continue;
-      const b64 = fs.readFileSync(img).toString('base64');
-      content.push({ type: 'input_image', image_url: `data:${mime(img)};base64,${b64}` });
+      if (typeof img === 'string') {
+        if (!fs.existsSync(img)) continue;
+        const b64 = fs.readFileSync(img).toString('base64');
+        content.push({ type: 'input_image', image_url: `data:${mime(img)};base64,${b64}` });
+      } else {
+        // In-memory buffer: already downscaled by the caller to keep requests small.
+        if (img.label) content.push({ type: 'input_text', text: img.label });
+        content.push({
+          type: 'input_image',
+          image_url: `data:image/jpeg;base64,${img.data.toString('base64')}`,
+        });
+      }
     }
     return [
       { role: 'system', content: req.system },

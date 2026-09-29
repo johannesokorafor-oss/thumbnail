@@ -85,6 +85,7 @@ export function Results({
                 <div className="k">Gewählte Variante</div><div>#{active.selectedVariant ?? '–'}</div>
                 <div className="k">Auswahlgrund</div><div>{active.selectionReason ?? '–'}</div>
                 <div className="k">Design-Score</div><div>{active.finalScore ?? '–'} / 10</div>
+                <div className="k">Kandidaten</div><div>{active.variants?.length ?? 0} generiert · {active.rejectedCount ?? 0} verworfen</div>
                 <div className="k">Generierungen</div><div>{active.generationCount} · Iterationen {active.iterationCount}</div>
                 <div className="k">Kosten (Schätzung)</div><div>${(active.estimatedCostUsd ?? 0).toFixed(3)}</div>
                 <div className="k">Ausgabeordner</div><div className="mono">{active.outputDir ?? '–'}</div>
@@ -99,6 +100,85 @@ export function Results({
               )}
             </div>
           </div>
+
+          {active.generation && (
+            <div className="card" style={{ marginBottom: 18 }}>
+              <div className="row spread">
+                <h2 style={{ margin: 0 }}>Tatsächlich verwendete Generierung</h2>
+                <span className={`pill ${active.generation.degradations.length ? 'warn' : 'ok'}`}>
+                  {active.generation.testMode
+                    ? 'TEST_MODE – synthetische Bilder'
+                    : active.generation.degradations.length
+                      ? `${active.generation.degradations.length} Abweichung(en)`
+                      : 'ohne Abweichung'}
+                </span>
+              </div>
+              <table>
+                <thead><tr><th>Parameter</th><th>Angefragt</th><th>Tatsächlich</th></tr></thead>
+                <tbody>
+                  <tr>
+                    <td>Modell</td>
+                    <td className="mono">{active.generation.requestedModel}</td>
+                    <td className="mono">{active.generation.actualModel}</td>
+                  </tr>
+                  <tr>
+                    <td>Qualität <span className="muted">({active.generation.qualitySource})</span></td>
+                    <td className="mono">{active.generation.requestedQuality}</td>
+                    <td className="mono">{active.generation.actualQuality}</td>
+                  </tr>
+                  <tr>
+                    <td>Größe</td>
+                    <td className="mono">{active.generation.requestedSize}</td>
+                    <td className="mono">{active.generation.actualSize}</td>
+                  </tr>
+                  <tr>
+                    <td>Provider / Premium</td>
+                    <td className="mono">{active.generation.provider}</td>
+                    <td className="mono">{active.generation.premium ? 'premium' : 'standard'}</td>
+                  </tr>
+                </tbody>
+              </table>
+              {!!active.generation.degradations.length && (
+                <table style={{ marginTop: 10 }}>
+                  <thead><tr><th>Abweichung</th><th>Grund</th></tr></thead>
+                  <tbody>
+                    {active.generation.degradations.map((d, i) => (
+                      <tr key={i}>
+                        <td className="mono">[{d.kind}] {d.requested} → {d.actual}</td>
+                        <td className="muted">{d.reason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
+
+          {active.ranking && (
+            <div className="card" style={{ marginBottom: 18 }}>
+              <div className="row spread">
+                <h2 style={{ margin: 0 }}>Direkter Bildvergleich</h2>
+                <span className="pill">{active.ranking.source === 'vision-model' ? 'Bildvergleich durch Vision-Modell' : 'TEST_MODE-Messung'}</span>
+              </div>
+              <p className="kpi-hint" style={{ marginTop: 6 }}>
+                Reihenfolge: {active.ranking.order.map((i) => `#${i}`).join(' > ')} — Sieger #{active.ranking.winner}
+              </p>
+              <p>{active.ranking.reason}</p>
+              {!!active.ranking.perCandidate?.length && (
+                <table>
+                  <thead><tr><th>Kandidat</th><th>Urteil</th></tr></thead>
+                  <tbody>
+                    {active.ranking.perCandidate.map((p) => (
+                      <tr key={p.index}>
+                        <td className="mono">#{p.index}{p.index === active.ranking!.winner ? ' ✓' : ''}</td>
+                        <td className="muted">{p.verdict}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
 
           {active.qa && (
             <div className="card" style={{ marginBottom: 18 }}>
@@ -132,10 +212,56 @@ export function Results({
                       alt={`Variante ${v.index}`}
                     />
                     <div className="row spread" style={{ marginTop: 7 }}>
-                      <strong style={{ fontSize: 13 }}>Variante {v.index}{active.selectedVariant === v.index ? ' · gewählt' : ''}</strong>
-                      <span className="pill">{v.critique?.scoreTotal ?? '–'} / 10</span>
+                      <strong style={{ fontSize: 13 }}>
+                        Variante {v.index}
+                        {active.selectedVariant === v.index ? ' · GEWÄHLT' : ''}
+                        {v.rejected ? ' · verworfen' : ''}
+                        {v.refined ? ' · verfeinert' : ''}
+                      </strong>
+                      <span className={`pill ${v.rejected ? 'warn' : ''}`}>{v.critique?.scoreTotal ?? '–'} / 10</span>
                     </div>
                     <div className="kpi-hint">{v.critique?.summary ?? 'keine Bewertung'}</div>
+                    {v.rejected && v.rejectionReason && (
+                      <div className="kpi-hint" style={{ color: 'var(--warn, #e0a33e)' }}>Verworfen: {v.rejectionReason}</div>
+                    )}
+                    {v.localQa && (
+                      <details style={{ marginTop: 6 }}>
+                        <summary className="muted" style={{ cursor: 'pointer' }}>
+                          Lokale Qualitätsprüfung: {v.localQa.passed ? 'bestanden' : `${v.localQa.checks.filter((c) => !c.passed).length} Mangel/Mängel`}
+                        </summary>
+                        <table>
+                          <tbody>
+                            {v.localQa.checks.map((c) => (
+                              <tr key={c.name}>
+                                <td style={{ width: 170 }}>{c.name}</td>
+                                <td style={{ width: 50 }}>{c.passed ? <span className="pill ok">ok</span> : <span className="pill warn">!</span>}</td>
+                                <td className="muted">{c.detail}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </details>
+                    )}
+                    {!!v.critique?.reasons?.length && (
+                      <details style={{ marginTop: 6 }}>
+                        <summary className="muted" style={{ cursor: 'pointer' }}>
+                          Begründung der Bewertung ({v.critique.source === 'vision-model' ? 'Bildanalyse' : 'TEST_MODE-Messung'})
+                        </summary>
+                        <ul className="muted" style={{ margin: '6px 0 0 16px' }}>
+                          {v.critique.reasons.map((r, i) => <li key={i}>{r}</li>)}
+                          {v.critique.defects.map((d, i) => <li key={`d${i}`}>Mangel: {d}</li>)}
+                        </ul>
+                        <div className="kpi-hint">
+                          Kleinansicht: {v.critique.smallSizeReadable ? 'lesbar' : 'nicht lesbar'} · {v.critique.smallSizeVerdict}
+                        </div>
+                      </details>
+                    )}
+                    {v.degradations && v.degradations.length > 0 && (
+                      <div className="kpi-hint">
+                        Abweichungen: {v.degradations.map((d) => `${d.kind} ${d.requested}→${d.actual}`).join(', ')}
+                      </div>
+                    )}
+                    {v.latencyMs != null && <div className="kpi-hint">Generierungsdauer: {(v.latencyMs / 1000).toFixed(1)}s</div>}
                     <button className="btn" style={{ marginTop: 7 }} disabled={busy}
                       onClick={() => act(() => api.regenerate(active.id, { variant: v.index, resumeFrom: 'generation' }), `Variante ${v.index} neu`)}>
                       Diese Variante neu generieren
@@ -150,11 +276,12 @@ export function Results({
             <div className="card">
               <h2>Entwickelte Konzepte</h2>
               <table>
-                <thead><tr><th>ID</th><th>Konzept</th><th>Idee</th><th>Textbereich</th><th>Score</th></tr></thead>
+                <thead><tr><th>ID</th><th>Strategie</th><th>Konzept</th><th>Idee</th><th>Textbereich</th><th>Score</th></tr></thead>
                 <tbody>
                   {active.concepts.map((c) => (
                     <tr key={c.id}>
                       <td className="mono">{c.id}</td>
+                      <td className="mono">{c.strategy ?? '–'}</td>
                       <td>{c.label}{c.unusual ? ' ★' : ''}</td>
                       <td className="muted">{c.idea}</td>
                       <td className="mono">{c.textArea}</td>

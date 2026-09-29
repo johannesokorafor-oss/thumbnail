@@ -17,7 +17,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "tsx scripts/e2e.ts"
+    "e2e": "tsx scripts/e2e.ts",
+    "e2e:real": "tsx scripts/realE2E.ts",
+    "benchmark": "tsx scripts/benchmark.ts"
   },
   "repository": {
     "type": "git",

@@ -4,10 +4,16 @@ import { buildImagePrompt } from '../src/ai/prompting/promptBuilder.js';
 import { DEFAULT_CHANNEL_PROFILE } from '../src/config/index.js';
 import type { ScriptAnalysis, ThumbnailConcept } from '../src/types/index.js';
 
-function concept(id: string, score: number, unusual = false, textArea: ThumbnailConcept['textArea'] = 'RIGHT_TEXT'): ThumbnailConcept {
+function concept(
+  id: string,
+  score: number,
+  unusual = false,
+  textArea: ThumbnailConcept['textArea'] = 'RIGHT_TEXT',
+  strategy: ThumbnailConcept['strategy'] = 'SUBJECT_CLOSEUP',
+): ThumbnailConcept {
   const s = normalizeScore(Object.fromEntries(Object.keys(normalizeScore({})).map((k) => [k, score])));
   return {
-    id, label: `Konzept ${id}`, idea: 'Idee', subject: 'Motiv', action: '', environment: '', era: '',
+    id, label: `Konzept ${id}`, strategy, emotion: 'Staunen', idea: 'Idee', subject: 'Motiv', action: '', environment: '', era: '',
     composition: 'Motiv links', camera: '', lighting: '', color: '', mood: '', depth: '', detail: '',
     visualMetaphor: '', textArea, style: 'CINEMATIC_DOCUMENTARY', thumbnailText: 'TEXT',
     unusual, score: s, scoreTotal: computeScoreTotal(s),
@@ -60,13 +66,13 @@ describe('Prompt-Builder', () => {
   });
 
   it('enthält alle Prompt-Ebenen', () => {
-    for (const layer of ['Subject:', 'Composition:', 'Camera:', 'Lighting:', 'Color:', 'Mood:', 'Depth:', 'Text-safe area:', 'Thumbnail use:', 'Avoid:', 'Do not produce:']) {
+    for (const layer of ['SCENE', 'COMPOSITION AND CAMERA', 'EMOTION', 'LIGHTING', 'COLOR', 'STYLE', 'THUMBNAIL FUNCTION', 'RESERVED SPACE', 'AVOID', 'ACCURACY']) {
       expect(prompt).toContain(layer);
     }
   });
 
   it('verbietet Text im LOCAL_OVERLAY-Modus', () => {
-    expect(prompt).toContain('no text, no letters');
+    expect(prompt).toContain('no text, letters, numbers, captions, watermarks or logos');
   });
 
   it('fordert Text im AI_RENDERED-Modus an', () => {
@@ -75,10 +81,11 @@ describe('Prompt-Builder', () => {
       textMode: 'AI_RENDERED', thumbnailText: 'Das verbotene Wissen',
     });
     expect(aiPrompt).toContain('DAS VERBOTENE WISSEN');
-    expect(aiPrompt).not.toContain('no text, no letters');
+    expect(aiPrompt).not.toContain('no text, letters, numbers, captions, watermarks or logos');
   });
 
   it('reserviert eine Textfläche passend zum Konzept', () => {
-    expect(prompt).toContain('right third of the frame stays visually calm');
+    expect(prompt).toContain('visually calm');
+    expect(prompt).toMatch(/right/i);
   });
 });

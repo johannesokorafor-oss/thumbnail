@@ -1,42 +1,104 @@
-import type { ChannelProfile, ScriptAnalysis, TextMode, TextPosition, ThumbnailConcept } from '../../types/index.js';
+import type {
+  ChannelProfile,
+  ScriptAnalysis,
+  TextMode,
+  TextPosition,
+  ThumbnailConcept,
+  ThumbnailStrategy,
+} from '../../types/index.js';
 
-/** Where the image must stay calm so the overlay text can breathe (section 21). */
+/** Where the image must stay calm so the overlay text can breathe. */
 export const TEXT_AREA_DESCRIPTION: Record<TextPosition, string> = {
-  LEFT_TEXT: 'the left third of the frame stays visually calm and uncluttered (dark or low-detail), no important detail there',
-  RIGHT_TEXT: 'the right third of the frame stays visually calm and uncluttered (dark or low-detail), no important detail there',
-  TOP_TEXT: 'the upper 30% of the frame stays visually calm and uncluttered, no important detail there',
-  BOTTOM_TEXT: 'the lower 30% of the frame stays visually calm and uncluttered, no important detail there',
-  CENTER_TEXT: 'the central horizontal band stays relatively calm, the subject is pushed to the outer thirds',
+  LEFT_TEXT: 'the left third of the frame',
+  RIGHT_TEXT: 'the right third of the frame',
+  TOP_TEXT: 'the upper third of the frame',
+  BOTTOM_TEXT: 'the lower third of the frame',
+  CENTER_TEXT: 'a horizontal band across the middle of the frame',
+};
+
+const SUBJECT_PLACEMENT: Record<TextPosition, string> = {
+  LEFT_TEXT: 'Place the main subject in the right half of the frame, facing or leaning into the empty left side.',
+  RIGHT_TEXT: 'Place the main subject in the left half of the frame, facing or leaning into the empty right side.',
+  TOP_TEXT: 'Place the main subject low and large in the frame so the sky/ceiling area above stays open.',
+  BOTTOM_TEXT: 'Place the main subject high in the frame so the foreground area below stays open and simple.',
+  CENTER_TEXT: 'Split the interest to the left and right thirds and keep the central band comparatively quiet.',
+};
+
+/**
+ * Camera and framing recipes per visual strategy.
+ * Each strategy produces a genuinely different picture, not a re-worded variant.
+ */
+const STRATEGY_DIRECTION: Record<ThumbnailStrategy, { framing: string; intent: string }> = {
+  SUBJECT_CLOSEUP: {
+    framing:
+      'Tight portrait framing: head-and-shoulders or closer, subject filling roughly half the frame height, 85mm lens look, shallow depth of field with the background falling into soft, dark separation.',
+    intent: 'The face (or the single hero surface) carries the entire story. One person, one expression, nothing competing.',
+  },
+  DRAMATIC_SCENE: {
+    framing:
+      'Wider cinematic framing with a clear hero silhouette against the environment, 35mm lens look, strong perspective lines leading to the subject, layered foreground / midground / background.',
+    intent: 'A decisive moment caught mid-action, the kind of frame that implies what happened one second earlier.',
+  },
+  MYSTERY_REVEAL: {
+    framing:
+      'Partially concealed subject: shot through a doorway, shadow, fabric, dust or glass so a meaningful part stays hidden, with a single bright accent drawing the eye to what is revealed.',
+    intent: 'The viewer must feel they are seeing the edge of something and want the rest.',
+  },
+  HUMAN_EMOTION: {
+    framing:
+      'Human reaction framing: upper body, hands and face both readable, eye level or slightly low angle, the emotional gesture forming a strong silhouette.',
+    intent: 'A single unmistakable emotion — realisation, shock, grief, awe — never a neutral posed look.',
+  },
+  SYMBOLIC_METAPHOR: {
+    framing:
+      'Graphic, almost editorial composition built around one symbolic object or event, generous negative space, deliberate geometry, one impossible or surreal element inside an otherwise physically real scene.',
+    intent: 'The image reads as an idea, not as a snapshot.',
+  },
+  OBJECT_HERO: {
+    framing:
+      'The object is the protagonist: macro or near-macro, dramatic scale, lit like a museum piece, background reduced to tone and shadow.',
+    intent: 'A thing nobody would normally look twice at is made monumental.',
+  },
+  CONTRAST_SPLIT: {
+    framing:
+      'A single continuous frame that contains two contrasting realities (then/now, outside/inside, micro/macro) separated by a natural edge in the scene — light, architecture, water, a horizon — not by a hard graphic divider.',
+    intent: 'The tension between the two halves is the hook.',
+  },
+  SCALE_SHIFT: {
+    framing:
+      'Extreme scale relationship: a small human figure against something overwhelming, or a microscopic detail treated like a landscape, with strong atmospheric depth.',
+    intent: 'The size relationship itself is the story.',
+  },
 };
 
 const STYLE_HINTS: Record<string, string> = {
-  CINEMATIC_DOCUMENTARY: 'cinematic documentary photography, anamorphic feel, motivated practical light, filmic contrast',
-  PHOTOREALISTIC: 'photorealistic, physically correct light, real camera optics, natural micro-texture',
-  MYSTERIOUS: 'low-key mystery lighting, deep shadows, one dominant light source, restrained fog only where motivated',
-  HISTORICAL: 'historically plausible materials, patina, period-correct props, museum-grade authenticity',
-  COSMIC: 'astronomical scale, deep space contrast, physically plausible cosmic light',
-  SCIENTIFIC: 'clean laboratory realism, precise instruments, controlled cool lighting',
-  DARK_LUXURY: 'dark premium editorial look, rich materials, controlled specular highlights',
-  ANCIENT_MANUSCRIPT: 'aged parchment, ink texture, candlelit archive, tactile paper fibres',
-  SURREAL_SYMBOLIC: 'surreal but coherent symbolism, one impossible element inside an otherwise real scene',
-  HIGH_CONTRAST_EDITORIAL: 'bold editorial contrast, graphic shapes, strong figure-ground separation',
-  MODERN_DOCUMENTARY: 'modern documentary realism, handheld feel, natural colour grading',
-  EPIC_HISTORICAL: 'epic historical scale, monumental architecture, dramatic sky and light',
+  CINEMATIC_DOCUMENTARY: 'Cinematic documentary photography. Motivated practical light, filmic contrast, real optics, subtle grain.',
+  PHOTOREALISTIC: 'Photorealistic photography. Physically correct light, real lens behaviour, natural micro-texture in skin and material.',
+  MYSTERIOUS: 'Low-key mystery photography. Deep shadow, one dominant light source, atmosphere only where the scene motivates it.',
+  HISTORICAL: 'Historically plausible photography. Period-correct materials, patina, museum-grade authenticity, no fantasy props.',
+  COSMIC: 'Astrophotography-inspired realism. Vast scale, deep blacks, physically plausible cosmic light.',
+  SCIENTIFIC: 'Clean scientific realism. Precise instruments, controlled cool lighting, laboratory-accurate detail.',
+  DARK_LUXURY: 'Dark premium editorial photography. Rich materials, controlled specular highlights, restrained palette.',
+  ANCIENT_MANUSCRIPT: 'Archive photography. Aged parchment, ink texture, candlelit reading room, tactile paper fibres.',
+  SURREAL_SYMBOLIC: 'Surreal editorial photography. One impossible element rendered with complete physical realism.',
+  HIGH_CONTRAST_EDITORIAL: 'Bold editorial photography. Graphic shapes, hard figure-ground separation, confident negative space.',
+  MODERN_DOCUMENTARY: 'Modern documentary realism. Handheld energy, natural colour grading, unstaged feeling.',
+  EPIC_HISTORICAL: 'Epic historical cinematography. Monumental scale, dramatic sky, strong god-rays only where motivated.',
 };
 
-const UNIVERSAL_NEGATIVES = [
-  'no text, no letters, no words, no captions, no watermarks, no logos, no numbers',
-  'no collage, no split grid of many panels, no borders or frames',
-  'no generic stock photography aesthetic',
-  'no plastic, waxy or overly glossy AI skin',
-  'no random lens flares, no floating particles, no unmotivated fog',
-  'no everything-is-gold colour scheme',
-  'no exaggerated vignette',
-  'no cheap sci-fi look',
-  'no cluttered background full of tiny objects',
-  'no boring perfect symmetry',
-  'no extra limbs, no deformed hands, no broken anatomy, no impossible perspective',
-  'no tiny main subject, no low contrast mush',
+/**
+ * A short, non-contradictory negative list.
+ * The OpenAI image guidance warns against over-constraining with long,
+ * conflicting instruction lists, so this stays focused on the failure modes
+ * that actually ruin a thumbnail.
+ */
+const CORE_NEGATIVES = [
+  'no text, letters, numbers, captions, watermarks or logos anywhere in the image',
+  'no duplicated or cloned subjects, no malformed hands or faces, no impossible anatomy',
+  'no busy background full of small competing objects',
+  'no second focal point that fights the main subject',
+  'no borders, frames, collage panels or split-screen graphics',
+  'no flat, evenly lit stock-photo look',
 ];
 
 export interface PromptBuildInput {
@@ -50,81 +112,146 @@ export interface PromptBuildInput {
   improvement?: string;
 }
 
-/** Layered prompt builder (section 20). */
+function sentence(value: string | undefined, fallback = ''): string {
+  const v = (value ?? '').trim();
+  if (!v) return fallback;
+  return /[.!?]$/.test(v) ? v : `${v}.`;
+}
+
+/**
+ * Builds a professional image specification that optimises for a THUMBNAIL,
+ * not for a generically pretty picture.
+ */
 export function buildImagePrompt(input: PromptBuildInput): string {
   const { concept, analysis, profile, textMode } = input;
+  const strategy = concept.strategy ?? 'DRAMATIC_SCENE';
+  const direction = STRATEGY_DIRECTION[strategy] ?? STRATEGY_DIRECTION.DRAMATIC_SCENE;
   const style = STYLE_HINTS[concept.style] ?? STYLE_HINTS.CINEMATIC_DOCUMENTARY;
   const aspect = input.aspectRatio ?? profile.preferred_aspect_ratio ?? '16:9';
   const aiText = textMode === 'AI_RENDERED' || textMode === 'BOTH_FOR_COMPARISON';
 
-  const negatives = [...UNIVERSAL_NEGATIVES, ...profile.forbidden_elements.map((f) => `avoid: ${f}`)];
-  const textNegatives = aiText ? negatives.filter((n) => !n.startsWith('no text')) : negatives;
+  const negatives = aiText ? CORE_NEGATIVES.slice(1) : CORE_NEGATIVES;
+  const forbidden = profile.forbidden_elements.slice(0, 4);
 
-  const lines = [
-    `Create a premium, professional ${aspect} YouTube thumbnail image — not a generic illustration, not a movie poster.`,
-    '',
-    'Subject:',
-    `${concept.subject}. ${concept.action}`.trim(),
-    '',
-    'Action:',
-    concept.action || 'a single decisive moment, frozen',
-    '',
-    'Environment:',
-    concept.environment || analysis.IMPORTANT_LOCATIONS[0] || 'an atmospheric environment that matches the topic',
-    '',
-    'Era / context:',
-    concept.era || 'timeless, plausible for the topic',
-    '',
-    'Composition:',
-    `${concept.composition}. One single dominant focal point that fills a large part of the frame. Strong silhouette, clear foreground / midground / background separation, decisive visual hierarchy, rule-of-thirds placement, no clutter.`,
-    '',
-    'Camera:',
-    concept.camera || '35mm full-frame, slightly low angle, shallow depth of field',
-    '',
-    'Lighting:',
-    `${concept.lighting || 'directed key light with deep falloff'}; high-quality motivated lighting, strong separation between subject and background`,
-    '',
-    'Color:',
-    `${concept.color || profile.preferred_color_moods[0]}; high contrast, limited but distinct palette, no muddy midtones`,
-    '',
-    'Mood:',
-    concept.mood || analysis.EMOTIONAL_CORE || 'intriguing and premium',
-    '',
-    'Depth:',
-    concept.depth || 'pronounced depth, subject clearly detached from background',
-    '',
-    'Important details:',
-    `${concept.detail || 'few but precise details on the main subject'}. Visual metaphor: ${concept.visualMetaphor || 'the hidden becomes visible'}.`,
-    '',
-    'Text-safe area:',
-    `Reserve clean negative space for a headline: ${TEXT_AREA_DESCRIPTION[concept.textArea]}.`,
-    '',
-    'Thumbnail use:',
-    `Must read instantly at 320px width on a phone: large subject, bold shapes, strong contrast, ${profile.preferred_thumbnail_density} visual density, subject size ${profile.preferred_subject_size}.`,
-    '',
-    'Style:',
-    style,
-    '',
-    'Accuracy:',
-    'Artistic reconstruction is allowed and should look like one; do not fabricate a documentary "proof" of something that did not happen, and do not depict identifiable real people doing things the script does not state.',
-  ];
+  const parts: string[] = [];
 
-  if (aiText) {
-    lines.push('', 'Rendered headline:', `Render the exact headline "${(input.thumbnailText ?? concept.thumbnailText).toUpperCase()}" once, in a bold condensed sans-serif, cleanly placed in the reserved text area, perfectly spelled, no other text anywhere.`);
+  parts.push(
+    `A single ${aspect} photographic still designed to work as a YouTube video thumbnail. ` +
+      `${direction.intent}`,
+  );
+
+  parts.push(
+    [
+      'SCENE',
+      sentence(concept.subject, 'A single strong subject.'),
+      sentence(concept.action),
+      sentence(concept.environment, sentence(analysis.IMPORTANT_LOCATIONS[0])),
+      sentence(concept.era),
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+
+  parts.push(
+    [
+      'COMPOSITION AND CAMERA',
+      direction.framing,
+      SUBJECT_PLACEMENT[concept.textArea],
+      sentence(concept.composition),
+      sentence(concept.camera),
+      'One unmistakable focal point. Strong readable silhouette. Clear separation between foreground, subject and background. Deliberate depth.',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+
+  if (concept.emotion || strategy === 'HUMAN_EMOTION' || strategy === 'SUBJECT_CLOSEUP') {
+    parts.push(
+      ['EMOTION', sentence(concept.emotion, 'A specific, readable human emotion carried by expression and body language — intense but not theatrical.')].join('\n'),
+    );
   }
 
+  parts.push(
+    [
+      'LIGHTING',
+      sentence(concept.lighting, 'Directional key light with deep, controlled falloff.'),
+      'Light must separate the subject from the background: rim light, backlight or a bright surface behind a dark subject.',
+    ].join('\n'),
+  );
+
+  parts.push(
+    [
+      'COLOR',
+      sentence(concept.color, sentence(profile.preferred_color_moods[0])),
+      'Limited, coherent palette with one dominant accent. Deep blacks, clean highlights, no muddy midtones.',
+    ].join('\n'),
+  );
+
+  parts.push(['STYLE', style, sentence(concept.mood, sentence(analysis.EMOTIONAL_CORE))].filter(Boolean).join('\n'));
+
+  parts.push(
+    [
+      'THUMBNAIL FUNCTION',
+      `The image will be viewed at 320 pixels wide. Everything essential must survive that reduction: large subject (${profile.preferred_subject_size}), bold shapes, high contrast, ${profile.preferred_thumbnail_density} visual density.`,
+      'No fine detail that carries meaning. No small objects that turn to noise when scaled down.',
+    ].join('\n'),
+  );
+
+  parts.push(
+    [
+      'RESERVED SPACE',
+      aiText
+        ? `Keep ${TEXT_AREA_DESCRIPTION[concept.textArea]} visually calm for a headline.`
+        : `Keep ${TEXT_AREA_DESCRIPTION[concept.textArea]} visually calm and low in detail — a headline will be composited there afterwards. Nothing important may sit in that area.`,
+    ].join('\n'),
+  );
+
   if (input.referenceStyle) {
-    lines.push('', 'Abstract style direction (do NOT copy any existing artwork):', input.referenceStyle);
+    parts.push(['STYLE REFERENCE (abstract direction only, never copy an existing artwork)', input.referenceStyle].join('\n'));
   }
 
   if (input.improvement) {
-    lines.push('', 'Targeted improvements over the previous attempt:', input.improvement);
+    parts.push(['TARGETED CHANGES COMPARED TO THE PREVIOUS ATTEMPT', input.improvement].join('\n'));
   }
 
-  lines.push('', 'Avoid:', textNegatives.map((n) => `- ${n}`).join('\n'));
-  lines.push('', 'Do not produce:', '- a poster, a book cover, a magazine layout, a UI mockup, an infographic, or any typography (unless a headline was explicitly requested above)');
+  if (aiText) {
+    parts.push(
+      [
+        'HEADLINE',
+        `Render exactly this headline once, spelled exactly as written: "${(input.thumbnailText ?? concept.thumbnailText).toUpperCase()}".`,
+        `Bold condensed sans-serif, placed in ${TEXT_AREA_DESCRIPTION[concept.textArea]}, high contrast against its background. No other text anywhere.`,
+      ].join('\n'),
+    );
+  }
 
-  return lines.join('\n');
+  parts.push(['AVOID', ...negatives.map((n) => `- ${n}`), ...forbidden.map((f) => `- ${f}`)].join('\n'));
+
+  parts.push(
+    'ACCURACY\nTreat undocumented historical moments as clearly artistic reconstructions. Do not depict identifiable real people performing actions the source material does not state.',
+  );
+
+  return parts.join('\n\n');
+}
+
+/** Short, specific instruction for a targeted refinement edit. */
+export function buildRefinementPrompt(params: {
+  concept: ThumbnailConcept;
+  defects: string[];
+  instruction: string;
+  textArea: TextPosition;
+}): string {
+  const fixes = params.defects.slice(0, 3).map((d) => `- ${d}`).join('\n');
+  return [
+    'Refine this thumbnail image. Keep the overall composition, subject identity, lighting mood and colour palette intact.',
+    '',
+    'Fix only the following:',
+    fixes || `- ${params.instruction}`,
+    '',
+    params.instruction,
+    '',
+    `Keep ${TEXT_AREA_DESCRIPTION[params.textArea]} calm and free of important detail.`,
+    'Do not add text, letters, logos or watermarks. Do not change the subject into a different person or object.',
+  ].join('\n');
 }
 
 /** Human-readable dump written to PROMPT_USED.txt. */
@@ -134,17 +261,25 @@ export function formatPromptFile(params: {
   model: string;
   quality: string;
   size: string;
+  requested?: { model: string; quality: string; size: string };
   textMode: TextMode;
   thumbnailText: string;
+  degradations?: Array<{ kind: string; requested: string; actual: string; reason: string }>;
 }): string {
+  const deg = params.degradations?.length
+    ? params.degradations.map((d) => `  - ${d.kind}: ${d.requested} -> ${d.actual} (${d.reason})`).join('\n')
+    : '  keine';
   return `# PROMPT USED
-Model:      ${params.model}
-Quality:    ${params.quality}
-Size:       ${params.size}
+
+Angefragt:  model=${params.requested?.model ?? params.model} quality=${params.requested?.quality ?? params.quality} size=${params.requested?.size ?? params.size}
+Tatsächlich: model=${params.model} quality=${params.quality} size=${params.size}
+Abweichungen:
+${deg}
+
 Text mode:  ${params.textMode}
 Text:       ${params.thumbnailText}
-Concept:    ${params.concept.id} – ${params.concept.label}
-Text area:  ${params.concept.textArea}
+Konzept:    ${params.concept.id} – ${params.concept.label} [${params.concept.strategy ?? 'n/a'}]
+Textfläche: ${params.concept.textArea}
 
 --- IMAGE PROMPT ---
 ${params.prompt}

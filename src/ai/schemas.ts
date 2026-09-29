@@ -62,10 +62,31 @@ export const CRITIQUE_SCHEMA = {
     hierarchyClear: { type: 'boolean' }, textAreaSufficient: { type: 'boolean' },
     textAreaLocation: str, overloaded: { type: 'boolean' },
     looksPremium: { type: 'boolean' }, looksLikeRealThumbnail: { type: 'boolean' },
+    feelsGeneric: { type: 'boolean' },
+    smallSizeVerdict: str, smallSizeReadable: { type: 'boolean' },
     visualContradictions: strArr, anatomyOrPerspectiveErrors: strArr, artifacts: strArr,
+    defects: strArr, fixableByEdit: { type: 'boolean' }, reasons: strArr,
     titleImageConnection: str, score: SCORE_SCHEMA, improvementPrompt: str, summary: str,
   },
   required: ['firstImpression', 'mainSubject', 'score', 'summary'],
+} as const;
+
+export const RANKING_SCHEMA = {
+  type: 'object',
+  properties: {
+    order: { type: 'array', items: { type: 'number' } },
+    winner: { type: 'number' },
+    reason: str,
+    perCandidate: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { index: { type: 'number' }, verdict: str },
+        required: ['index', 'verdict'],
+      },
+    },
+  },
+  required: ['order', 'winner', 'reason'],
 } as const;
 
 export const TEXT_SCHEMA = {

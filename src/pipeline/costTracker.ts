@@ -4,25 +4,44 @@ import { CostLimitError } from '../utils/retry.js';
 import { getConfig } from '../config/index.js';
 
 /**
- * Pricing table for cost ESTIMATES only. The real invoice is whatever the
- * provider charges — every number produced here is flagged `estimated: true`.
+ * Cost ESTIMATES, calibrated against the published OpenAI image pricing
+ * (image output tokens are billed at $30 per 1M tokens for both 2.5 models).
+ *
+ * Token counts below are the documented values for 1024x1024 and 1536x1024;
+ * the per-megapixel rate is derived from them and then scaled to the actual
+ * requested size. Everything produced here is flagged `estimated: true` —
+ * the real invoice is whatever OpenAI charges.
  */
-export const IMAGE_PRICE_TABLE: Record<string, Record<string, number>> = {
-  'gpt-image-2.5-sunburst': { max: 0.25, xhigh: 0.17, high: 0.12, medium: 0.06, low: 0.03 },
-  'gpt-image-2.5-flare': { max: 0.12, xhigh: 0.09, high: 0.06, medium: 0.03, low: 0.02 },
-  default: { max: 0.2, xhigh: 0.15, high: 0.1, medium: 0.05, low: 0.02 },
+export const IMAGE_TOKEN_PRICE_PER_MILLION = 30;
+
+/** Documented output tokens per megapixel, derived from the published tables. */
+const TOKENS_PER_MEGAPIXEL: Record<string, number> = {
+  // 1024x1024 = 1.049 MP -> max 7024 tok, xhigh 3122 tok, high 1413 tok
+  max: 6_696,
+  xhigh: 2_976,
+  high: 1_347,
+  medium: 674,
+  low: 337,
+  auto: 2_976,
+};
+
+/** Relative token cost per model (flare is the smaller, cheaper model). */
+const MODEL_TOKEN_FACTOR: Record<string, number> = {
+  'gpt-image-2.5-sunburst': 1,
+  'gpt-image-2.5-flare': 0.5,
+  default: 1,
 };
 
 /** Rough per-call estimate for text/reasoning models (USD). */
 export const ANALYSIS_CALL_ESTIMATE = 0.05;
 
 export function estimateImageCost(model: string, quality: string, count: number, size = '2560x1440'): number {
-  const table = IMAGE_PRICE_TABLE[model] ?? IMAGE_PRICE_TABLE.default;
-  const base = table[quality] ?? table.high ?? 0.1;
+  const tokensPerMp = TOKENS_PER_MEGAPIXEL[quality] ?? TOKENS_PER_MEGAPIXEL.high;
+  const factor = MODEL_TOKEN_FACTOR[model] ?? MODEL_TOKEN_FACTOR.default;
   const [w, h] = size.split('x').map(Number);
-  const pixels = (w || 1536) * (h || 1024);
-  const scale = Math.max(0.6, Math.min(2.2, pixels / (1536 * 1024)));
-  return Number((base * scale * count).toFixed(4));
+  const megapixels = ((w || 2560) * (h || 1440)) / 1_000_000;
+  const tokens = tokensPerMp * megapixels * factor;
+  return Number(((tokens / 1_000_000) * IMAGE_TOKEN_PRICE_PER_MILLION * count).toFixed(4));
 }
 
 export class CostTracker {

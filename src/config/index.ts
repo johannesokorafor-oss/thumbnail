@@ -76,13 +76,14 @@ function envConfig(): AppConfig {
     imageModel: process.env.IMAGE_MODEL || 'gpt-image-2.5-sunburst',
     fallbackImageModel: process.env.IMAGE_MODEL_FALLBACK || 'gpt-image-2.5-flare',
     imageProvider: (process.env.IMAGE_PROVIDER as 'openai' | 'google') || 'openai',
-    quality: process.env.IMAGE_QUALITY || 'max',
+    // 'auto' = der Qualitätsmodus entscheidet. Ein expliziter Wert gewinnt darüber.
+    quality: process.env.IMAGE_QUALITY || 'auto',
     resolution: process.env.IMAGE_SIZE || '2560x1440',
     qualityMode: (process.env.QUALITY_MODE as QualityMode) || 'BALANCED',
     variantCount: num(process.env.VARIANT_COUNT, 4),
     maxVariantCount: num(process.env.MAX_VARIANT_COUNT, 6),
-    maxCostPerJob: num(process.env.MAX_COST_PER_JOB, 2.5),
-    maxDailyCost: num(process.env.MAX_COST_PER_DAY, 25),
+    maxCostPerJob: num(process.env.MAX_COST_PER_JOB, 8),
+    maxDailyCost: num(process.env.MAX_COST_PER_DAY, 40),
     inputFolder: resolveFolder(process.env.INPUT_FOLDER, 'data/workspace/Scripts/Incoming'),
     outputFolder: resolveFolder(process.env.OUTPUT_FOLDER, 'data/workspace/Thumbnails/Generated'),
     archiveFolder: resolveFolder(process.env.ARCHIVE_FOLDER, 'data/workspace/Thumbnails/Archive'),
@@ -158,17 +159,93 @@ export function saveChannelProfile(profile: ChannelProfile): ChannelProfile {
   return profile;
 }
 
-/** Quality-mode presets (section 16). */
-export function qualityModeSettings(mode: QualityMode) {
+/**
+ * Honest quality profiles.
+ *
+ * `premium: true` means: the configured premium model and quality are binding.
+ * The provider must NOT silently swap the model or step the quality down —
+ * a failure is reported as a failure instead of returning cheaper output.
+ */
+export interface QualityProfile {
+  /** How many concepts the strategist develops. */
+  concepts: number;
+  /** How many image candidates are generated. */
+  variants: number;
+  /** Image quality actually requested from the API. */
+  quality: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+  /** Depth of the AI critique. */
+  critique: 'light' | 'full';
+  /** Allow one targeted refinement pass on the winner. */
+  refinementPasses: number;
+  /** Binding premium configuration (no silent downgrades). */
+  premium: boolean;
+  /** May the provider step the quality down when the API rejects it? */
+  allowQualityFallback: boolean;
+  /** May the provider switch to the fallback image model? */
+  allowModelFallback: boolean;
+  /** Human readable description shown in the UI. */
+  description: string;
+}
+
+export function qualityModeSettings(mode: QualityMode): QualityProfile {
   switch (mode) {
     case 'FAST':
-      return { concepts: 3, variants: 2, quality: 'high', critique: 'light' as const, allowSecondPass: false };
+      return {
+        concepts: 3,
+        variants: 2,
+        quality: 'high',
+        critique: 'light',
+        refinementPasses: 0,
+        premium: false,
+        allowQualityFallback: true,
+        allowModelFallback: true,
+        description: 'Geschwindigkeit vor Maximalqualität: weniger Kandidaten, Qualitätsstufe "high", Modellwechsel erlaubt.',
+      };
     case 'MAX':
-      return { concepts: 5, variants: 5, quality: 'max', critique: 'full' as const, allowSecondPass: true };
+      return {
+        concepts: 5,
+        variants: 4,
+        quality: 'max',
+        critique: 'full',
+        refinementPasses: 1,
+        premium: true,
+        allowQualityFallback: false,
+        allowModelFallback: false,
+        description: 'Premium: Sunburst mit Qualität "max", volle visuelle Bewertung, ein gezielter Refinement-Pass. Keine stillen Abstufungen.',
+      };
     default:
-      return { concepts: 5, variants: 4, quality: 'max', critique: 'full' as const, allowSecondPass: false };
+      return {
+        concepts: 5,
+        variants: 4,
+        quality: 'xhigh',
+        critique: 'full',
+        refinementPasses: 0,
+        premium: true,
+        allowQualityFallback: false,
+        allowModelFallback: false,
+        description: 'Hohe Qualität: Sunburst mit Qualität "xhigh", volle visuelle Bewertung. Keine stillen Abstufungen.',
+      };
   }
 }
+
+/**
+ * The quality actually requested for a job.
+ * An explicitly configured IMAGE_QUALITY wins over the mode default, so the
+ * setting in the UI is never silently ignored.
+ */
+export function resolveRequestedQuality(cfg: AppConfig = getConfig()): {
+  quality: string;
+  source: 'config' | 'quality-mode';
+} {
+  const profile = qualityModeSettings(cfg.qualityMode);
+  const configured = (cfg.quality ?? '').trim().toLowerCase();
+  if (configured && configured !== 'auto' && VALID_IMAGE_QUALITIES.includes(configured)) {
+    return { quality: configured, source: 'config' };
+  }
+  return { quality: profile.quality, source: 'quality-mode' };
+}
+
+export const VALID_IMAGE_QUALITIES = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export function ensureWorkspaceFolders(cfg: AppConfig = getConfig()): void {
   for (const dir of [cfg.inputFolder, cfg.outputFolder, cfg.archiveFolder, cfg.failedFolder, cfg.referenceFolder, RUNTIME_DIR]) {
@@ -180,4 +257,12 @@ export function ensureWorkspaceFolders(cfg: AppConfig = getConfig()): void {
   }
 }
 
-export const IMAGE_QUALITY_FALLBACK_CHAIN = ['max', 'xhigh', 'high', 'medium'];
+/** Ordered quality ladder, best first. Used only when a fallback is explicitly allowed. */
+export const IMAGE_QUALITY_LADDER = ['max', 'xhigh', 'high', 'medium', 'low'];
+
+/** Steps strictly below the requested quality, best first. */
+export function qualityFallbacksBelow(requested: string): string[] {
+  const idx = IMAGE_QUALITY_LADDER.indexOf(requested);
+  if (idx < 0) return ['high'];
+  return IMAGE_QUALITY_LADDER.slice(idx + 1);
+}

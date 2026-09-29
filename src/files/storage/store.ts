@@ -39,9 +39,20 @@ export class JsonStore<T> {
   }
 
   private flush(): void {
-    const tmp = `${this.file}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2));
-    fs.renameSync(tmp, this.file);
+    // Eindeutiger Temp-Name: mehrere Prozesse (Server, Benchmark, E2E) dürfen
+    // denselben Store schreiben, ohne sich die Temp-Datei wegzuziehen.
+    const tmp = `${this.file}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2));
+      fs.renameSync(tmp, this.file);
+    } catch (err) {
+      try {
+        fs.rmSync(tmp, { force: true });
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
   }
 }
 

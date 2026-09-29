@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import sharp from 'sharp';
-import type { GeneratedImage, ImageProvider, ImageRequest, TextProvider, TextRequest, TextResult } from '../types.js';
+import type { GeneratedImage, ImageProvider, ImageRefineRequest, ImageRequest, TextProvider, TextRequest, TextResult } from '../types.js';
+import { THUMBNAIL_STRATEGIES } from '../../../types/index.js';
 
 /**
  * TEST_MODE providers (section 51).
@@ -35,7 +36,13 @@ export class MockImageProvider implements ImageProvider {
     return true;
   }
 
+  async refine(req: ImageRefineRequest): Promise<GeneratedImage> {
+    const [img] = await this.generate({ ...req, prompt: `${req.prompt}::refined`, n: 1 });
+    return img;
+  }
+
   async generate(req: ImageRequest): Promise<GeneratedImage[]> {
+    const started = Date.now();
     const [w, h] = req.size.includes('x') ? req.size.split('x').map(Number) : [2560, 1440];
     const width = w || 2560;
     const height = h || 1440;
@@ -64,13 +71,36 @@ export class MockImageProvider implements ImageProvider {
   <rect width="100%" height="100%" fill="url(#bg)"/>
   <circle cx="${(cx * width).toFixed(0)}" cy="${(cy * height).toFixed(0)}" r="${(r * height * 2).toFixed(0)}" fill="url(#glow)"/>
   <ellipse cx="${(cx * width).toFixed(0)}" cy="${(cy * height).toFixed(0)}" rx="${(r * width * 0.5).toFixed(0)}" ry="${(r * height * 0.95).toFixed(0)}" fill="hsl(${hue2},80%,60%)" opacity="0.85"/>
+  <g opacity="0.95">
+    ${Array.from({ length: 26 }, (_, k) => {
+      const ang = (k / 26) * Math.PI * 2;
+      const rx = cx * width + Math.cos(ang) * r * width * 0.42;
+      const ry = cy * height + Math.sin(ang) * r * height * 0.78;
+      return `<rect x="${rx.toFixed(0)}" y="${ry.toFixed(0)}" width="${(width * 0.012).toFixed(0)}" height="${(height * 0.02).toFixed(0)}" fill="${k % 2 ? '#ffffff' : '#000000'}" opacity="0.8"/>`;
+    }).join('')}
+  </g>
   <rect x="0" y="${(height * 0.82).toFixed(0)}" width="${width}" height="${(height * 0.18).toFixed(0)}" fill="#000" opacity="0.35"/>
   <text x="${(width * 0.04).toFixed(0)}" y="${(height * 0.95).toFixed(0)}" font-family="sans-serif" font-size="${Math.round(height * 0.035)}" fill="#ffffff" opacity="0.75">TEST MODE ARTWORK · variant ${i + 1}</text>
 </svg>`;
       const data = await sharp(Buffer.from(svg))
         .toFormat(req.outputFormat === 'jpeg' ? 'jpeg' : 'png')
         .toBuffer();
-      out.push({ data, model: 'mock-image-model', quality: req.quality, size: `${width}x${height}` });
+      out.push({
+        data,
+        model: 'mock-image-model',
+        quality: req.quality,
+        size: `${width}x${height}`,
+        requested: { model: req.model ?? 'mock-image-model', quality: req.quality, size: req.size },
+        degradations: [
+          {
+            kind: 'model',
+            requested: req.model ?? 'mock-image-model',
+            actual: 'mock-image-model',
+            reason: 'TEST_MODE: synthetisches Platzhalterbild, keine echte Bildgenerierung.',
+          },
+        ],
+        latencyMs: Date.now() - started,
+      });
     }
     return out;
   }
@@ -85,14 +115,51 @@ export class MockTextProvider implements TextProvider {
   }
 
   async complete(req: TextRequest): Promise<TextResult> {
-    return { text: JSON.stringify(this.build(req)), model: 'mock-analysis-model' };
+    return { text: JSON.stringify(await this.build(req)), model: 'mock-analysis-model' };
   }
 
   async completeJson<T>(req: TextRequest): Promise<{ value: T; model: string }> {
-    return { value: this.build(req) as T, model: 'mock-analysis-model' };
+    return { value: (await this.build(req)) as T, model: 'mock-analysis-model' };
   }
 
-  private build(req: TextRequest): unknown {
+  /**
+   * Measures the images that were actually handed in, so TEST_MODE scores move
+   * with the pixels instead of being a hardcoded constant.
+   */
+  private async measure(req: TextRequest): Promise<Array<{ contrast: number; luminance: number; focus: number }>> {
+    const buffers = (req.images ?? [])
+      .map((i) => (typeof i === 'string' ? null : i.data))
+      .filter((b): b is Buffer => Buffer.isBuffer(b));
+    const out: Array<{ contrast: number; luminance: number; focus: number }> = [];
+    for (const buf of buffers) {
+      try {
+        const stats = await sharp(buf).stats();
+        const ch = stats.channels.slice(0, 3);
+        const contrast = ch.reduce((a, c) => a + c.stdev, 0) / ch.length;
+        const luminance = ch.reduce((a, c) => a + c.mean, 0) / ch.length;
+        const { data, info } = await sharp(buf)
+          .greyscale()
+          .resize(192, 108, { fit: 'fill' })
+          .raw()
+          .toBuffer({ resolveWithObject: true });
+        let sum = 0;
+        let count = 0;
+        for (let y = 1; y < info.height; y++) {
+          for (let x = 1; x < info.width; x++) {
+            const i = y * info.width + x;
+            sum += Math.abs(data[i] - data[i - 1]) + Math.abs(data[i] - data[i - info.width]);
+            count++;
+          }
+        }
+        out.push({ contrast, luminance, focus: sum / Math.max(1, count) });
+      } catch {
+        /* unreadable payload is simply skipped */
+      }
+    }
+    return out;
+  }
+
+  private async build(req: TextRequest): Promise<unknown> {
     const kind = req.jsonSchemaName ?? '';
     const text = req.user;
     const words = text
@@ -153,6 +220,8 @@ export class MockTextProvider implements TextProvider {
         concepts: labels.map((label, i) => ({
           id: `C${i + 1}`,
           label,
+          strategy: THUMBNAIL_STRATEGIES[i % THUMBNAIL_STRATEGIES.length],
+          emotion: ['Anspannung', 'Staunen', 'Neugier', 'Erschütterung', 'Ehrfurcht'][i % 5],
           idea: `${label} rund um ${top[i % Math.max(top.length, 1)] ?? 'das Kernthema'}.`,
           subject: i === 2 ? `Ein einzelnes ${cap(top[2] ?? 'Objekt')} in extremer Nahaufnahme` : `Eine markante Figur im Kontext von ${top[0] ?? 'dem Thema'}`,
           action: 'hält inne, während sich etwas Unerwartetes ereignet',
@@ -183,29 +252,82 @@ export class MockTextProvider implements TextProvider {
     }
 
     if (kind === 'variant_critique') {
+      const m = (await this.measure(req))[0];
+      const clamp = (v: number) => Math.max(0, Math.min(10, Math.round(v * 10) / 10));
+      const contrast = m ? clamp(m.contrast / 7) : 5;
+      const focus = m ? clamp(m.focus / 3) : 5;
+      const exposure = m ? clamp(10 - Math.abs(m.luminance - 118) / 14) : 5;
+      const base = clamp((contrast + focus + exposure) / 3);
       return {
-        firstImpression: 'Das leuchtende Hauptmotiv in der linken Bildhälfte.',
-        mainSubject: 'Zentrales Motiv mit klarer Silhouette',
-        topicClear: true,
-        createsCuriosity: true,
-        hierarchyClear: true,
+        firstImpression: m
+          ? `Messwerte: Kontrast ${m.contrast.toFixed(1)}, Helligkeit ${m.luminance.toFixed(1)}, Kantenenergie ${m.focus.toFixed(2)}.`
+          : 'Kein auswertbares Bild übergeben.',
+        mainSubject: 'Hellster, detailreichster Bereich des Platzhalterbildes',
+        topicClear: base >= 5,
+        createsCuriosity: focus >= 4,
+        hierarchyClear: focus >= 4,
         textAreaSufficient: true,
         textAreaLocation: 'RIGHT_TEXT',
-        overloaded: false,
-        looksPremium: true,
-        looksLikeRealThumbnail: true,
+        overloaded: focus > 8.5,
+        looksPremium: base >= 6,
+        looksLikeRealThumbnail: false,
+        feelsGeneric: true,
+        smallSizeVerdict: `Kontrast ${contrast.toFixed(1)}/10 bleibt in der Kleinansicht erhalten.`,
+        smallSizeReadable: contrast >= 4,
         visualContradictions: [],
         anatomyOrPerspectiveErrors: [],
         artifacts: [],
-        titleImageConnection: 'Bild ergänzt den Titel, ohne ihn zu wiederholen.',
+        defects: base < 5 ? ['Zu geringer Kontrast bzw. zu schwacher Fokus im Platzhalterbild.'] : [],
+        fixableByEdit: base >= 4,
+        titleImageConnection: 'TEST_MODE: synthetisches Bild, keine inhaltliche Bewertung möglich.',
+        reasons: [
+          `Kontrast-Messung ergibt ${contrast.toFixed(1)}/10.`,
+          `Fokus-/Kantenmessung ergibt ${focus.toFixed(1)}/10.`,
+          `Belichtung ergibt ${exposure.toFixed(1)}/10.`,
+          'Bewertung stammt aus TEST_MODE-Pixelmessung, nicht aus einem Vision-Modell.',
+        ],
         score: {
-          ATTENTION: 8, CURIOSITY: 8, INSTANT_COMPREHENSION: 8, EMOTIONAL_IMPACT: 7,
-          VISUAL_CLARITY: 8, SUBJECT_PROMINENCE: 8, COMPOSITION: 8, CONTRAST: 8,
-          COLOR_DIVERSITY: 7, SMALL_SCREEN_READABILITY: 8, TITLE_ALIGNMENT: 8,
-          NOVELTY: 7, CLICK_INTENT: 8, CONTENT_ACCURACY: 9, VISUAL_SIMPLICITY: 8,
+          ATTENTION: contrast, CURIOSITY: focus, INSTANT_COMPREHENSION: base,
+          EMOTIONAL_IMPACT: clamp(base - 1), VISUAL_CLARITY: exposure,
+          SUBJECT_PROMINENCE: focus, COMPOSITION: base, CONTRAST: contrast,
+          COLOR_DIVERSITY: clamp(contrast - 1), SMALL_SCREEN_READABILITY: contrast,
+          TITLE_ALIGNMENT: base, NOVELTY: clamp(focus - 2), CLICK_INTENT: base,
+          CONTENT_ACCURACY: base, VISUAL_SIMPLICITY: clamp(10 - focus),
         },
-        improvementPrompt: 'Hauptmotiv 10% größer, Hintergrund weiter beruhigen, Textfläche rechts freihalten.',
-        summary: 'Solide, klare Komposition mit ausreichender Textfläche.',
+        improvementPrompt: 'Hauptmotiv vergrößern, Hintergrund beruhigen, Textfläche freihalten.',
+        summary: `TEST_MODE-Messbewertung: Gesamteindruck ${base.toFixed(1)}/10.`,
+      };
+    }
+
+    if (kind === 'visual_ranking') {
+      const measured = await this.measure(req);
+      const indices = [...String(req.user).matchAll(/#(\d+)/g)].map((x) => Number(x[1]));
+      const unique = [...new Set(indices)];
+      // Two payloads per candidate (full + 320px view) — score on the full view.
+      const scored = unique.map((idx, i) => {
+        const m = measured[i * 2] ?? measured[i];
+        return { idx, value: m ? m.contrast / 7 + m.focus / 3 : 0 };
+      });
+      scored.sort((a, b) => b.value - a.value);
+      return {
+        order: scored.map((s2) => s2.idx),
+        winner: scored[0]?.idx ?? unique[0] ?? 1,
+        reason: 'TEST_MODE: Reihenfolge nach gemessenem Kontrast und Kantenenergie der echten Bilddateien.',
+        perCandidate: scored.map((s2) => ({
+          index: s2.idx,
+          verdict: `Messwert ${s2.value.toFixed(2)} (Kontrast + Fokus).`,
+        })),
+      };
+    }
+
+    if (kind === 'final_check') {
+      const m = (await this.measure(req))[0];
+      return {
+        approved: !m || m.contrast > 12,
+        issues: m && m.contrast <= 12 ? ['Sehr geringer Gesamtkontrast im fertigen Thumbnail.'] : [],
+        notes: m
+          ? `TEST_MODE-Messung: Kontrast ${m.contrast.toFixed(1)}, Helligkeit ${m.luminance.toFixed(1)}.`
+          : 'Kein Bild übergeben.',
       };
     }
 

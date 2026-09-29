@@ -24,7 +24,9 @@ Lokale Desktop-/Web-App, die aus einem fertigen YouTube-Skript automatisch ein p
 10. [Testmodus](#testmodus)
 11. [Tests & Build](#tests--build)
 12. [Troubleshooting](#troubleshooting)
-13. [Architektur](#architektur)
+13. [Bildgröße](#bildgröße-169)
+14. [Qualitätssicherung der Kandidaten](#qualitätssicherung-der-kandidaten)
+15. [Architektur](#architektur)
 14. [Bekannte Limitationen](#bekannte-limitationen)
 
 ---
@@ -156,11 +158,71 @@ Mit *Erneut erzwingen* lässt sich das übergehen.
 
 ## Quality Modes
 
-| Modus | Konzepte | Varianten | Bewertung | Zweite Generierung |
-|---|---|---|---|---|
-| `FAST` | 3 | 2 | verkürzt | nein |
-| `BALANCED` (Default) | 5 | 4 | vollständig | nein |
-| `MAX` | 5 | 5 | vollständig | ja, gezielt für den Favoriten |
+| Modus | Konzepte | Kandidaten | Qualität | Bewertung | Verfeinerung | Stille Downgrades |
+|---|---|---|---|---|---|---|
+| `FAST` | 3 | 2 | `high` | verkürzt | nein | erlaubt (wird protokolliert) |
+| `BALANCED` (Default) | 5 | 4 | `xhigh` | vollständig | nein | **nicht erlaubt** |
+| `MAX` | 5 | 4 | `max` | vollständig | 1 Durchgang | **nicht erlaubt** |
+
+`IMAGE_QUALITY=auto` (Default) bedeutet: der Modus entscheidet. Ein explizit gesetzter Wert
+(`low|medium|high|xhigh|max`) gewinnt über den Modus; welche Quelle gegriffen hat, steht in den
+Metadaten als `quality_source` und in der UI.
+
+### Ehrlichkeitsgarantie (Premium-Vertrag)
+
+In `BALANCED` und `MAX` sind Modell- und Qualitäts-Fallbacks **abgeschaltet**. Kann Sunburst oder
+die angeforderte Qualität nicht geliefert werden, bricht die Generierung mit
+`PREMIUM_MODEL_UNAVAILABLE` bzw. `PREMIUM_QUALITY_UNAVAILABLE` ab, statt heimlich auf Flare oder
+`high` zu wechseln. Jede tatsächlich aufgetretene Abweichung wird als `degradation` gespeichert und
+erscheint in drei Ebenen:
+
+* **Log** — `[WARN] Qualitätsabweichung (model): gpt-image-2.5-sunburst -> …`
+* **Metadaten** — `requested_model` / `image_model`, `requested_quality` / `quality`,
+  `requested_size` / `size`, `quality_degradations[]`, `premium_mode`
+* **UI** — Karte „Tatsächlich verwendete Generierung" mit Soll/Ist-Tabelle
+
+`TEST_MODE` gilt dabei selbst als Abweichung: jedes Mock-Bild trägt eine `degradation` mit dem
+Hinweis, dass kein echtes Bild erzeugt wurde.
+
+---
+
+## Bildgröße (16:9)
+
+Alle Anfragen gehen als **explizite** Pixelgröße an die API, nie als Prompt-Text. Gültig ist nur,
+was die API dokumentiert: beide Kanten Vielfache von 16, Kante ≤ 3840 px, Verhältnis ≤ 3:1,
+Gesamtpixel zwischen 655.360 und 8.294.400.
+
+Die Fallback-Leiter (`src/image/size.ts`) enthält **ausschließlich 16:9-Größen**, damit ein
+Downgrade nie einen Beschnitt erzwingt:
+
+`3840x2160 → 2560x1440 (Default) → 2048x1152 → 1792x1008 → 1536x864 → 1280x720`
+
+> Achtung: `1920x1080` ist **nicht** API-konform (1080 ist kein Vielfaches von 16). Wird es
+> konfiguriert, rastet die App auf die nächste gültige Größe und protokolliert das ausdrücklich.
+
+---
+
+## Qualitätssicherung der Kandidaten
+
+Jeder generierte Kandidat durchläuft zwei Stufen, beide auf **echten Pixeln**:
+
+**Stufe 1 – deterministisch, lokal (`src/image/validation/candidateQa.ts`), ohne API-Kosten:**
+Bildintegrität, 16:9, Auflösung, Gesamtkontrast, Belichtung, Ruhe der geplanten Textfläche,
+Motivtrennung, Überladung, Kontrasterhalt bei 1280/640/**320 px**, Fokus in der 320px-Ansicht,
+Rahmen-/Letterbox-Artefakte sowie ein perzeptueller Hash zur Duplikaterkennung. Durchgefallene und
+nahezu identische Kandidaten werden verworfen (sichtbar mit Begründung, nicht gelöscht).
+
+**Stufe 2 – Vision-Kritik (`src/ai/critique/imageCritic.ts`):** nur die Überlebenden. Das Modell
+bekommt dasselbe Bild zweimal – in voller Auflösung **und** als 320px-Feed-Vorschau – und liefert
+15 Einzelkriterien plus strukturierte Begründungen, Defektliste, Artefakterkennung und ein Urteil,
+ob das Bild generisch wirkt.
+
+**Auswahl:** Alle Überlebenden gehen gemeinsam als **Bilder** in einen direkten Vergleich
+(`rankCandidatesVisually`) – nicht als Textzusammenfassungen. Reihenfolge, Sieger und Begründung
+stehen in `visual_ranking` und in der UI.
+
+**Verfeinerung (nur `MAX`):** ein gezielter `images.edit`-Durchgang gegen die genannten Mängel. Das
+Ergebnis wird erneut geprüft und **nur übernommen, wenn der Score tatsächlich steigt**.
 
 ---
 
@@ -203,12 +265,34 @@ JSON-Ausgabe, Image-Handling, Overlay, QA, Export und UI vollständig testbar si
 ## Tests & Build
 
 ```bash
-npm test         # 45 Tests: Sanitizing, Parser, Watcher-Filter, Retry, Score,
-                 # Prompt-Builder, Typografie, QA, Kosten, Logging + kompletter E2E-Lauf
+npm test         # 66 Tests: Sanitizing, Parser, Watcher-Filter, Retry, Score, Prompt-Builder,
+                 # Typografie, API-Größenregeln, Kandidaten-QA (echte Pixel), Duplikaterkennung,
+                 # Kosten, Logging + kompletter E2E-Lauf der Pipeline
 npm run typecheck
 npm run build    # tsc --noEmit + Vite-Build der UI
-npm run e2e      # legt das Beispielskript in den Input-Ordner und prüft den Gesamtablauf
+npm run e2e      # TEST_MODE-Gesamtablauf über den überwachten Input-Ordner
+npm run benchmark             # alle 8 Genre-Fixtures, Bericht nach data/runtime/benchmark_*.json
+OPENAI_API_KEY=sk-… npm run e2e:real   # ECHTER, kostenpflichtiger API-Lauf
 ```
+
+### `npm run e2e:real` — der einzige gültige Nachweis echter Bildgenerierung
+
+Dieser Lauf bricht sofort ab, wenn kein `OPENAI_API_KEY` gesetzt oder `TEST_MODE` aktiv ist. Er
+prüft die Modellverfügbarkeit, führt einen kompletten Job aus und gibt anschließend aus: Soll/Ist
+für Modell, Qualität und Größe, alle Abweichungen, Kandidaten samt lokaler QA und Kritik-Scores,
+das visuelle Ranking, die QA-Prüfliste, geschätzte Kosten sowie eine Exportprüfung der fertigen
+JPEG-Datei (Format, Maße, 16:9, Dateigröße gegen das 2-MB-Limit von YouTube).
+
+**Ein `TEST_MODE`-Lauf ist ausdrücklich kein Ersatz dafür.**
+
+### Benchmark
+
+`npm run benchmark` verarbeitet acht Skripte aus `data/examples/` (emotionale Menschengeschichte,
+Mystery, historisch, dramatisches Ereignis, Dokumentation, Bildung, dunkel/ernst, inspirierend) und
+schreibt einen JSON-Bericht mit: Generierungserfolg, Kandidatenzahl, verworfenen Kandidaten,
+Ergebnissen der lokalen QA, Kritik-Scores (min/max/Mittel), Auswahl, Laufzeit, geschätzten Kosten
+sowie dem real verwendeten Modell/Qualität/Größe. Es wird **keine „Verbesserung in Prozent"**
+ausgewiesen – dafür gibt es keine experimentelle Grundlage.
 
 ---
 
@@ -275,3 +359,14 @@ das steht auch sichtbar in den Einstellungen.
   Modell für den Account nicht verfügbar, erkennt die App das und nutzt den konfigurierten Fallback.
 * Die Bewertung der Varianten ist so gut wie das eingesetzte Vision-Modell; die deterministische
   QA (Seitenverhältnis, Auflösung, Kontrast, Textpräsenz, tote Flächen) läuft zusätzlich lokal.
+* **Im `TEST_MODE` sind alle Bilder synthetische Platzhalter.** Scores, QA-Ergebnisse und Kosten aus
+  einem TEST_MODE-Lauf belegen ausschließlich, dass die Pipeline technisch funktioniert – sie sagen
+  nichts über die Qualität echter Thumbnails aus. Die Mock-Bewertung ist deshalb als
+  `critique_source: "deterministic-mock"` markiert und leitet ihre Zahlen aus gemessenem Kontrast,
+  Belichtung und Kantenenergie der tatsächlichen Bilddatei ab (keine festen Konstanten).
+* Ob die tatsächlich erzeugten Thumbnails professionell wirken, ist **nur über `npm run e2e:real`
+  mit gültigem API-Key überprüfbar** und wurde in dieser Umgebung mangels Zugangsdaten nicht belegt.
+* Die Kostenschätzung basiert auf den veröffentlichten Bild-Token-Preisen ($30 pro 1 Mio.
+  Output-Tokens) und den dokumentierten Token-Zahlen; sie ist eine Näherung, keine Abrechnung.
+  Ein `MAX`-Job mit 4 Kandidaten bei 2560x1440 liegt geschätzt bei rund 3 USD – die Defaults
+  `MAX_COST_PER_JOB=8` / `MAX_COST_PER_DAY=40` sind entsprechend gesetzt.

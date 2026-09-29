@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { getChannelProfile, getConfig, qualityModeSettings } from '../config/index.js';
+import { getChannelProfile, getConfig, qualityModeSettings, resolveRequestedQuality } from '../config/index.js';
 import { parserRegistry, type ParsedScript } from '../files/parser/index.js';
 import { getImageProvider, getTextProvider } from '../ai/providers/registry.js';
 import { analyzeScript } from '../ai/analysis/scriptAnalyzer.js';
@@ -12,8 +12,15 @@ import {
   selectBestVariant,
   selectTopConcepts,
 } from '../ai/thumbnail/strategist.js';
-import { buildImagePrompt, formatPromptFile } from '../ai/prompting/promptBuilder.js';
-import { critiqueVariant, extractReferenceStyle, mobileReadabilityCheck } from '../ai/critique/imageCritic.js';
+import { buildImagePrompt, buildRefinementPrompt, formatPromptFile } from '../ai/prompting/promptBuilder.js';
+import {
+  critiqueVariant,
+  extractReferenceStyle,
+  finalCompositionCheck,
+  rankCandidatesVisually,
+} from '../ai/critique/imageCritic.js';
+import { findNearDuplicates, runCandidateQa } from '../image/validation/candidateQa.js';
+import { formatSize, resolveRequestSize, parseSize as parseApiSize } from '../image/size.js';
 import { renderTextOverlay } from '../image/overlay/textOverlay.js';
 import { makeMobilePreview, normalizeToTarget, parseSize, toJpeg } from '../image/processing/normalize.js';
 import { runQualityAssurance } from '../image/validation/qa.js';
@@ -29,6 +36,7 @@ import type {
   ScriptAnalysis,
   ThumbnailAnalysisFile,
   ThumbnailConcept,
+  VisualRanking,
 } from '../types/index.js';
 
 export interface RunOptions {
@@ -98,7 +106,11 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
   const textProvider = getTextProvider();
   const imageProvider = getImageProvider();
   const targetSize = parseSize(cfg.resolution);
-  const quality = cfg.testMode ? cfg.quality : modeSettings.quality;
+  // What we ASK the API for — resolved once and reported everywhere.
+  const requestedQuality = resolveRequestedQuality(cfg);
+  const quality = requestedQuality.quality;
+  const sizeResolution = resolveRequestSize(parseApiSize(cfg.resolution));
+  const requestSize = formatSize(sizeResolution.size);
   const variantCount = Math.max(1, Math.min(cfg.maxVariantCount, cfg.testMode ? cfg.variantCount : Math.min(modeSettings.variants, cfg.variantCount || modeSettings.variants)));
 
   let job = jobManager.get(jobId);
@@ -189,10 +201,24 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
     // ---------- 3. Image generation ----------
     jobManager.setStatus(jobId, 'GENERATING');
     const variants: GeneratedVariant[] = [];
+    const allDegradations: Array<{ kind: string; requested: string; actual: string; reason: string }> = [];
+    if (sizeResolution.note) {
+      allDegradations.push({ kind: 'size', requested: cfg.resolution, actual: requestSize, reason: sizeResolution.note });
+      logger.warn(sizeResolution.note, { job_id: jobId, stage: 'size_resolution' });
+    }
     const keepExisting = opts.onlyVariant !== undefined ? job.variants ?? [] : [];
 
-    for (let i = 0; i < chosenConcepts.length; i++) {
+    // Resuming at 'overlay'/'critique' must not re-run image generation.
+    const reuseVariants = (opts.resumeFrom === 'overlay' || opts.resumeFrom === 'critique') && (job.variants?.length ?? 0) > 0;
+    for (let i = 0; reuseVariants ? i < (job.variants?.length ?? 0) : i < chosenConcepts.length; i++) {
       const index = i + 1;
+      if (reuseVariants) {
+        const prev = job.variants![i];
+        if (fs.existsSync(prev.file)) {
+          variants.push(prev);
+          continue;
+        }
+      }
       if (opts.onlyVariant !== undefined && opts.onlyVariant !== index) {
         const prev = keepExisting.find((v) => v.index === index);
         if (prev) variants.push(prev);
@@ -212,12 +238,21 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
       const t0 = Date.now();
       const [image] = await imageProvider.generate({
         prompt,
-        size: cfg.resolution,
+        model: cfg.imageModel,
+        size: requestSize,
         quality,
         n: 1,
         outputFormat: 'png',
         jobId,
+        allowQualityFallback: modeSettings.allowQualityFallback,
+        allowModelFallback: modeSettings.allowModelFallback,
       });
+      for (const d of image.degradations) {
+        allDegradations.push(d);
+        logger.warn(`Qualitätsabweichung (${d.kind}): ${d.requested} -> ${d.actual}`, {
+          job_id: jobId, stage: 'image_generation', error: d.reason, success: false,
+        });
+      }
       costTracker.record({
         jobId, kind: 'image', model: image.model, quality: image.quality,
         size: image.size, count: 1, estimatedUsd: estimateImageCost(image.model, image.quality, 1, image.size),
@@ -228,15 +263,33 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
       await fsp.writeFile(file, normalized);
       await fsp.writeFile(file.replace(/\.png$/, '.jpg'), await toJpeg(normalized, 90));
 
+      // Stage 1 — deterministic QA on the real pixels, before any AI critique.
+      const localQa = await runCandidateQa({
+        image: normalized,
+        targetSize: `${targetSize.width}x${targetSize.height}`,
+        textArea: concept.textArea,
+      });
+
       variants.push({
         index, conceptId: concept.id, file, prompt,
         model: image.model, quality: image.quality, size: `${targetSize.width}x${targetSize.height}`,
+        requested: image.requested,
+        degradations: image.degradations,
+        latencyMs: image.latencyMs,
+        localQa,
         iteration: 1,
       });
       logger.info(`Variante ${index} generiert`, {
         job_id: jobId, stage: 'image_generation', model: image.model,
+        quality: image.quality, size: image.size,
         duration_ms: Date.now() - t0, success: true,
       });
+      if (!localQa.passed) {
+        logger.warn(
+          `Variante ${index} scheitert an der lokalen Qualitätsprüfung: ${localQa.checks.filter((c) => !c.passed).map((c) => c.name).join(', ')}`,
+          { job_id: jobId, stage: 'candidate_qa', success: false },
+        );
+      }
       job = jobManager.update(jobId, {
         variants: [...variants],
         generationCount: (job.generationCount ?? 0) + 1,
@@ -244,9 +297,54 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
       });
     }
 
-    // ---------- 4. Visual critique ----------
+    // ---------- 4. Stage-1 gate: reject candidates that already failed locally ----------
     jobManager.setStatus(jobId, 'EVALUATING');
-    for (const variant of variants) {
+
+    const duplicates = findNearDuplicates(
+      variants
+        .filter((v) => v.localQa)
+        .map((v) => ({
+          index: v.index,
+          hash: v.localQa!.hash,
+          score: chosenConcepts.find((c) => c.id === v.conceptId)?.scoreTotal ?? 0,
+        })),
+    );
+    for (const dup of duplicates) {
+      const v = variants.find((x) => x.index === dup.index);
+      if (v) {
+        v.rejected = true;
+        v.rejectionReason = `Nahezu identisch mit Kandidat ${dup.duplicateOf} (Hash-Abstand ${dup.distance}).`;
+      }
+    }
+    for (const v of variants) {
+      if (v.rejected || !v.localQa || v.localQa.passed) continue;
+      v.rejected = true;
+      v.rejectionReason = `Lokale Qualitätsprüfung fehlgeschlagen: ${v.localQa.checks
+        .filter((c) => !c.passed)
+        .map((c) => `${c.name} (${c.detail})`)
+        .join('; ')}`;
+    }
+
+    // Never throw everything away: if the gate rejects all candidates, keep the
+    // least-bad one and say so, instead of failing the job silently.
+    let survivors = variants.filter((v) => !v.rejected);
+    if (!survivors.length && variants.length) {
+      const bestFallback = [...variants].sort(
+        (a, b) =>
+          (b.localQa?.checks.filter((c) => c.passed).length ?? 0) -
+          (a.localQa?.checks.filter((c) => c.passed).length ?? 0),
+      )[0];
+      bestFallback.rejected = false;
+      bestFallback.rejectionReason = undefined;
+      survivors = [bestFallback];
+      logger.warn('Alle Kandidaten haben die lokale Qualitätsprüfung nicht bestanden – bester Kandidat wird trotzdem verwendet.', {
+        job_id: jobId, stage: 'candidate_qa', success: false,
+      });
+    }
+    const rejectedCount = variants.filter((v) => v.rejected).length;
+
+    // ---------- 5. Stage-2 AI critique on the actual pixels ----------
+    for (const variant of survivors) {
       if (variant.critique && opts.onlyVariant !== undefined && opts.onlyVariant !== variant.index) continue;
       const concept = chosenConcepts.find((c) => c.id === variant.conceptId) ?? chosenConcepts[0];
       try {
@@ -268,68 +366,153 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
         variant.critique = undefined;
       }
     }
-    job = jobManager.update(jobId, { variants: [...variants], estimatedCostUsd: costTracker.jobTotal(jobId) });
+    job = jobManager.update(jobId, { variants: [...variants], rejectedCount, estimatedCostUsd: costTracker.jobTotal(jobId) });
 
-    // ---------- 5. Selection ----------
-    const summaries = variants.map((v) => {
-      const concept = chosenConcepts.find((c) => c.id === v.conceptId);
-      return {
-        index: v.index,
-        concept: `${concept?.label ?? v.conceptId}: ${concept?.idea ?? ''}`,
-        critique: v.critique?.summary ?? 'keine Bewertung verfügbar',
-        scoreTotal: v.critique?.scoreTotal ?? concept?.scoreTotal ?? 0,
-      };
-    });
+    // ---------- 6. Selection by direct VISUAL comparison ----------
+    let ranking: VisualRanking | undefined;
     let selection: { selectedIndex: number; reason: string };
     try {
-      selection = await selectBestVariant({ provider: textProvider, jobId, analysis: analysis!, summaries });
-    } catch {
-      const best = [...summaries].sort((a, b) => b.scoreTotal - a.scoreTotal)[0];
-      selection = { selectedIndex: best.index, reason: 'Automatische Auswahl über den technischen Design-Score.' };
+      costTracker.assertWithinBudget(jobId, ANALYSIS_CALL_ESTIMATE);
+      ranking = await rankCandidatesVisually({
+        provider: textProvider,
+        jobId,
+        analysis: analysis!,
+        candidates: survivors.map((v) => {
+          const c = chosenConcepts.find((x) => x.id === v.conceptId);
+          return {
+            index: v.index,
+            file: v.file,
+            conceptLabel: c?.label ?? v.conceptId,
+            strategy: c?.strategy ?? 'UNBEKANNT',
+          };
+        }),
+      });
+      costTracker.record({ jobId, kind: 'analysis', model: analysisModelUsed, count: 1, estimatedUsd: ANALYSIS_CALL_ESTIMATE });
+      selection = { selectedIndex: ranking.winner, reason: ranking.reason };
+    } catch (err) {
+      logger.warn('Visueller Direktvergleich fehlgeschlagen – wähle über die Einzelbewertungen', {
+        job_id: jobId, stage: 'ranking', error: (err as Error).message,
+      });
+      const summaries = survivors.map((v) => {
+        const concept = chosenConcepts.find((c) => c.id === v.conceptId);
+        return {
+          index: v.index,
+          concept: `${concept?.label ?? v.conceptId}: ${concept?.idea ?? ''}`,
+          critique: v.critique?.summary ?? 'keine Bewertung verfügbar',
+          scoreTotal: v.critique?.scoreTotal ?? concept?.scoreTotal ?? 0,
+        };
+      });
+      try {
+        selection = await selectBestVariant({ provider: textProvider, jobId, analysis: analysis!, summaries });
+      } catch {
+        const best = [...summaries].sort((a, b) => b.scoreTotal - a.scoreTotal)[0];
+        selection = { selectedIndex: best.index, reason: 'Automatische Auswahl über den Bewertungs-Score der echten Bilder.' };
+      }
     }
-    let selected = variants.find((v) => v.index === selection.selectedIndex) ?? variants[0];
+    let selected = survivors.find((v) => v.index === selection.selectedIndex) ?? survivors[0];
     const selectedConcept = chosenConcepts.find((c) => c.id === selected.conceptId) ?? chosenConcepts[0];
 
-    // ---------- 6. Optional targeted second pass (MAX mode) ----------
+    // ---------- 6b. Targeted refinement passes (re-evaluated every time) ----------
     let iterationCount = 1;
-    const critique = selected.critique;
-    const needsImprovement =
-      modeSettings.allowSecondPass &&
-      critique &&
-      (critique.scoreTotal < 8 || critique.overloaded || !critique.textAreaSufficient || critique.artifacts.length > 0);
+    for (let pass = 0; pass < modeSettings.refinementPasses; pass++) {
+      const critique = selected.critique;
+      const needsImprovement =
+        critique &&
+        (critique.scoreTotal < 8 ||
+          critique.overloaded ||
+          critique.feelsGeneric ||
+          !critique.textAreaSufficient ||
+          !critique.smallSizeReadable ||
+          critique.artifacts.length > 0 ||
+          critique.defects.length > 0);
+      if (!needsImprovement || !critique) break;
+      // Only worth an edit when the critic says the image idea itself is sound.
+      if (!critique.fixableByEdit && !critique.improvementPrompt) break;
 
-    if (needsImprovement && critique) {
       try {
-        const improvedPrompt = buildImagePrompt({
-          concept: selectedConcept,
-          analysis: analysis!,
-          profile,
-          textMode: cfg.textMode,
-          thumbnailText: selectedConcept.thumbnailText,
-          improvement: critique.improvementPrompt,
-        });
-        const estimate = estimateImageCost(cfg.imageModel, quality, 1, cfg.resolution);
+        const estimate = estimateImageCost(cfg.imageModel, quality, 1, requestSize);
         costTracker.assertWithinBudget(jobId, estimate);
-        const [improved] = await imageProvider.generate({
-          prompt: improvedPrompt, size: cfg.resolution, quality, n: 1, outputFormat: 'png', jobId,
+        const current = await fsp.readFile(selected.file);
+        const instruction = critique.improvementPrompt || critique.defects.join(' ');
+
+        let improved;
+        if (imageProvider.refine) {
+          improved = await imageProvider.refine({
+            image: current,
+            instruction,
+            prompt: buildRefinementPrompt({
+              concept: selectedConcept,
+              instruction,
+              defects: critique.defects,
+              textArea: selectedConcept.textArea,
+            }),
+            size: requestSize,
+            quality,
+            outputFormat: 'png',
+            jobId,
+            allowQualityFallback: modeSettings.allowQualityFallback,
+            allowModelFallback: modeSettings.allowModelFallback,
+          });
+        } else {
+          [improved] = await imageProvider.generate({
+            prompt: buildImagePrompt({
+              concept: selectedConcept, analysis: analysis!, profile,
+              textMode: cfg.textMode, thumbnailText: selectedConcept.thumbnailText,
+              improvement: instruction,
+            }),
+            size: requestSize, quality, n: 1, outputFormat: 'png', jobId,
+            allowQualityFallback: modeSettings.allowQualityFallback,
+            allowModelFallback: modeSettings.allowModelFallback,
+          });
+        }
+        for (const d of improved.degradations) allDegradations.push(d);
+
+        const normalized = await normalizeToTarget(improved.data, targetSize);
+        const refinedFile = selected.file.replace(/\.png$/, `_refined${pass + 1}.png`);
+        await fsp.writeFile(refinedFile, normalized);
+
+        const refinedQa = await runCandidateQa({
+          image: normalized,
+          targetSize: `${targetSize.width}x${targetSize.height}`,
+          textArea: selectedConcept.textArea,
+        });
+        const refinedCritique = await critiqueVariant({
+          provider: textProvider, imagePath: refinedFile, concept: selectedConcept,
+          analysis: analysis!, jobId, depth: modeSettings.critique,
         });
         costTracker.record({
           jobId, kind: 'image', model: improved.model, quality: improved.quality,
           size: improved.size, count: 1, estimatedUsd: estimateImageCost(improved.model, improved.quality, 1, improved.size),
         });
-        const normalized = await normalizeToTarget(improved.data, targetSize);
-        await fsp.writeFile(selected.file, normalized);
-        await fsp.writeFile(selected.file.replace(/\.png$/, '.jpg'), await toJpeg(normalized, 90));
-        selected = { ...selected, prompt: improvedPrompt, iteration: 2 };
-        variants[variants.findIndex((v) => v.index === selected.index)] = selected;
-        iterationCount = 2;
-        logger.info('Gezielte zweite Generierung für die Favoritenvariante abgeschlossen', {
-          job_id: jobId, stage: 'iteration', model: improved.model, success: true,
-        });
+
+        // Keep the refinement only if it actually got better.
+        if (refinedCritique.scoreTotal > critique.scoreTotal) {
+          await fsp.writeFile(selected.file, normalized);
+          await fsp.writeFile(selected.file.replace(/\.png$/, '.jpg'), await toJpeg(normalized, 90));
+          const updated: GeneratedVariant = {
+            ...selected,
+            critique: refinedCritique,
+            localQa: refinedQa,
+            iteration: selected.iteration + 1,
+            refined: true,
+          };
+          variants[variants.findIndex((v) => v.index === selected.index)] = updated;
+          selected = updated;
+          iterationCount += 1;
+          logger.info(`Verfeinerung ${pass + 1} übernommen (${critique.scoreTotal.toFixed(2)} -> ${refinedCritique.scoreTotal.toFixed(2)})`, {
+            job_id: jobId, stage: 'refinement', model: improved.model, success: true,
+          });
+        } else {
+          logger.info(`Verfeinerung ${pass + 1} verworfen (${refinedCritique.scoreTotal.toFixed(2)} <= ${critique.scoreTotal.toFixed(2)})`, {
+            job_id: jobId, stage: 'refinement', success: true,
+          });
+          break;
+        }
       } catch (err) {
-        logger.warn('Zweite Generierung fehlgeschlagen – behalte die erste Fassung', {
-          job_id: jobId, stage: 'iteration', error: (err as Error).message,
+        logger.warn('Verfeinerung fehlgeschlagen – behalte die bisherige Fassung', {
+          job_id: jobId, stage: 'refinement', error: (err as Error).message,
         });
+        break;
       }
     }
 
@@ -409,11 +592,14 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
 
     if (modeSettings.critique === 'full') {
       try {
-        const mobileCheck = await mobileReadabilityCheck({ provider: textProvider, imagePath: mobilePath, jobId, thumbnailText });
+        const finalCheck = await finalCompositionCheck({
+          provider: textProvider, image: finalPng, jobId, thumbnailText,
+          videoTitle: analysis!.VIDEO_TITLE,
+        });
         qa.checks.push({
-          name: 'mobile_readability',
-          passed: mobileCheck.textReadable && mobileCheck.subjectRecognizable && mobileCheck.compositionClear,
-          detail: mobileCheck.notes || 'KI-Prüfung der 320px-Vorschau.',
+          name: 'final_composition',
+          passed: finalCheck.approved,
+          detail: [finalCheck.notes, ...finalCheck.issues].filter(Boolean).join(' | ') || 'KI-Prüfung des fertigen Thumbnails.',
         });
         qa.passed = qa.checks.every((c) => c.passed);
       } catch {
@@ -432,6 +618,16 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
       concept_summary: `${selectedConcept.label}: ${selectedConcept.idea}`,
       selected_variant: selected.index,
       selection_reason: selection.reason,
+      candidates_generated: variants.length,
+      candidates_rejected: rejectedCount,
+      requested_model: selected.requested?.model ?? cfg.imageModel,
+      requested_quality: requestedQuality.quality,
+      requested_size: requestSize,
+      quality_source: requestedQuality.source,
+      premium_mode: modeSettings.premium,
+      quality_degradations: allDegradations,
+      visual_ranking: ranking ?? null,
+      critique_source: selected.critique?.source ?? 'none',
       image_model: selected.model,
       analysis_model: analysisModelUsed,
       image_provider: cfg.testMode ? 'mock' : cfg.imageProvider,
@@ -472,6 +668,21 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
       variants,
       selectedVariant: selected.index,
       selectionReason: selection.reason,
+      ranking,
+      rejectedCount,
+      generation: {
+        requestedModel: selected.requested?.model ?? cfg.imageModel,
+        actualModel: selected.model,
+        requestedQuality: requestedQuality.quality,
+        actualQuality: selected.quality,
+        qualitySource: requestedQuality.source,
+        requestedSize: requestSize,
+        actualSize: selected.size,
+        premium: modeSettings.premium,
+        degradations: allDegradations,
+        provider: cfg.testMode ? 'mock' : cfg.imageProvider,
+        testMode: cfg.testMode,
+      },
       thumbnailText,
       thumbnailHook: analysis!.PRIMARY_HOOK,
       conceptSummary: metadata.concept_summary,
