@@ -101,6 +101,22 @@ export function Results({
             </div>
           </div>
 
+          {active.status === 'REJECTED' && (
+            <div className="card" style={{ marginBottom: 18 }}>
+              <div className="row spread">
+                <h2 style={{ margin: 0 }}>Kein Kandidat war gut genug</h2>
+                <span className="pill warn">bewusst kein Export</span>
+              </div>
+              <p className="kpi-hint">
+                Es wurde absichtlich kein finales Thumbnail erzeugt: Ein schwaches Bild soll nicht
+                dadurch zum „besten" werden, dass die übrigen noch schwächer sind. Alle Kandidaten
+                bleiben unten zur Ansicht erhalten, der vollständige Bericht liegt als
+                REJECTION_REPORT.json im Ausgabeordner.
+              </p>
+              {active.error?.message && <p>{active.error.message}</p>}
+            </div>
+          )}
+
           {active.generation && (
             <div className="card" style={{ marginBottom: 18 }}>
               <div className="row spread">

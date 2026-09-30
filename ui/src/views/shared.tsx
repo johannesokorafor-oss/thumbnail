@@ -34,7 +34,7 @@ export function Workflow({ job }: { job?: Job }) {
 
 export function StatusPill({ status }: { status: string }) {
   const map: Record<string, string> = {
-    COMPLETED: 'ok', FAILED: 'err', WAITING: 'warn', SKIPPED_DUPLICATE: 'warn', QUEUED: 'info',
+    COMPLETED: 'ok', FAILED: 'err', REJECTED: 'warn', WAITING: 'warn', SKIPPED_DUPLICATE: 'warn', QUEUED: 'info',
   };
   return <span className={`pill ${map[status] ?? 'info'}`}>{status}</span>;
 }

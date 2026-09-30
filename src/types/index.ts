@@ -14,6 +14,8 @@ export type JobStatus =
   | 'COMPLETED'
   | 'FAILED'
   | 'SKIPPED_DUPLICATE'
+  /** Every candidate was too weak — no thumbnail is offered for upload. */
+  | 'REJECTED'
   | 'WAITING';
 
 export type QualityMode = 'FAST' | 'BALANCED' | 'MAX';
@@ -320,6 +322,8 @@ export interface AppConfig {
   qualityMode: QualityMode;
   variantCount: number;
   maxVariantCount: number;
+  /** Overrides the quality mode's minimum acceptable critic score. */
+  minThumbnailScore?: number;
   maxCostPerJob: number;
   maxDailyCost: number;
   inputFolder: string;
@@ -386,6 +390,17 @@ export interface ThumbnailAnalysisFile {
   estimated_cost_usd: number;
   cost_is_estimate: true;
   test_mode: boolean;
+  /** True wenn die Bildfläche Platzhalter-Grafik ist (TEST_MODE) — nie veröffentlichen. */
+  artwork_is_placeholder: boolean;
+  publishable: boolean;
+  not_publishable_reason: string | null;
+  text_placement: {
+    position: string;
+    reason: string;
+    focal_overlap: number | null;
+    backdrop_forced: boolean;
+    candidates: unknown[];
+  } | null;
   qa: QaReport | null;
   script_analysis: ScriptAnalysis | null;
   concepts: ThumbnailConcept[];

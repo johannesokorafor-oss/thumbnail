@@ -71,6 +71,26 @@ const STRATEGY_DIRECTION: Record<ThumbnailStrategy, { framing: string; intent: s
   },
 };
 
+/**
+ * How much of the frame the subject must occupy, per strategy.
+ * "Subject too small" is one of the most common reasons a technically good
+ * image fails as a thumbnail, so the scale is stated as a number instead of
+ * being left to the model's taste.
+ */
+const SUBJECT_SCALE: Record<ThumbnailStrategy, string> = {
+  SUBJECT_CLOSEUP: 'The subject fills about 60-75% of the frame height.',
+  DRAMATIC_SCENE: 'The hero subject fills about 35-50% of the frame height and is unmistakably the largest element.',
+  MYSTERY_REVEAL: 'The revealed part fills about 30-45% of the frame height and is the brightest area.',
+  HUMAN_EMOTION: 'The face and hands together fill about 45-60% of the frame height.',
+  SYMBOLIC_METAPHOR: 'The symbolic element fills about 40-55% of the frame height against generous empty space.',
+  OBJECT_HERO: 'The object fills about 55-70% of the frame height.',
+  CONTRAST_SPLIT: 'Each of the two realities fills roughly half the frame; the key detail in each is large enough to read at 320 pixels.',
+  SCALE_SHIFT: 'The overwhelming element dominates the frame; the small reference figure stays at least 8% of the frame height so it remains visible when scaled down.',
+};
+
+/** Words that state a left/right/top/bottom placement. */
+const PLACEMENT_WORDS = /\b(links|rechts|oben|unten|mittig|zentriert|left|right|top|bottom|centre|center)\b/i;
+
 const STYLE_HINTS: Record<string, string> = {
   CINEMATIC_DOCUMENTARY: 'Cinematic documentary photography. Motivated practical light, filmic contrast, real optics, subtle grain.',
   PHOTOREALISTIC: 'Photorealistic photography. Physically correct light, real lens behaviour, natural micro-texture in skin and material.',
@@ -152,12 +172,18 @@ export function buildImagePrompt(input: PromptBuildInput): string {
       .join('\n'),
   );
 
+  // The reserved text area dictates where the subject sits. A concept sentence
+  // that states a DIFFERENT side would contradict it, so it is dropped rather
+  // than stacked on top — conflicting instructions produce muddled images.
+  const conceptComposition = sentence(concept.composition);
+  const compositionConflicts = PLACEMENT_WORDS.test(concept.composition ?? '');
   parts.push(
     [
       'COMPOSITION AND CAMERA',
       direction.framing,
       SUBJECT_PLACEMENT[concept.textArea],
-      sentence(concept.composition),
+      SUBJECT_SCALE[strategy],
+      compositionConflicts ? '' : conceptComposition,
       sentence(concept.camera),
       'One unmistakable focal point. Strong readable silhouette. Clear separation between foreground, subject and background. Deliberate depth.',
     ]
@@ -192,7 +218,7 @@ export function buildImagePrompt(input: PromptBuildInput): string {
   parts.push(
     [
       'THUMBNAIL FUNCTION',
-      `The image will be viewed at 320 pixels wide. Everything essential must survive that reduction: large subject (${profile.preferred_subject_size}), bold shapes, high contrast, ${profile.preferred_thumbnail_density} visual density.`,
+      `The image will be viewed at 320 pixels wide. Everything essential must survive that reduction: ${profile.preferred_subject_size} subject, bold shapes, high contrast, ${profile.preferred_thumbnail_density} visual density.`,
       'No fine detail that carries meaning. No small objects that turn to noise when scaled down.',
     ].join('\n'),
   );
@@ -224,7 +250,13 @@ export function buildImagePrompt(input: PromptBuildInput): string {
     );
   }
 
-  parts.push(['AVOID', ...negatives.map((n) => `- ${n}`), ...forbidden.map((f) => `- ${f}`)].join('\n'));
+  // Kept deliberately short: long negative lists over-constrain the model and
+  // start to contradict each other.
+  const avoidList = [...negatives, ...forbidden]
+    .map((n) => n.trim())
+    .filter((n, i, all) => n && all.indexOf(n) === i)
+    .slice(0, 7);
+  parts.push(['AVOID', ...avoidList.map((n) => `- ${n}`)].join('\n'));
 
   parts.push(
     'ACCURACY\nTreat undocumented historical moments as clearly artistic reconstructions. Do not depict identifiable real people performing actions the source material does not state.',

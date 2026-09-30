@@ -27,7 +27,7 @@ fs.writeFileSync(target, `${fs.readFileSync(example, 'utf8')}\n\n<!-- E2E-Lauf $
 const completed = await new Promise<string>((resolve, reject) => {
   const timeout = setTimeout(() => reject(new Error('Timeout: Job wurde nicht abgeschlossen.')), 600_000);
   jobManager.on('job', (job) => {
-    if (['COMPLETED', 'FAILED', 'WAITING'].includes(job.status) && job.sourceFile === target) {
+    if (['COMPLETED', 'FAILED', 'WAITING', 'REJECTED'].includes(job.status) && job.sourceFile === target) {
       clearTimeout(timeout);
       resolve(job.id);
     }

@@ -159,3 +159,96 @@ enthalten, ist aber **nicht API-konform** (1080 ist kein Vielfaches von 16). Kor
 * Es wird bewusst **keine Verbesserungsquote in Prozent** angegeben: dafür hätte es einen
   kontrollierten Vergleich mit echten API-Bildern vorher/nachher gebraucht, der ohne Zugangsdaten
   nicht möglich war.
+
+---
+
+# Verifikationsbericht Qualitätsnachweis (Stand 2026-09-30)
+
+## Kernaussage vorweg
+
+**Der geforderte echte API-Lauf wurde NICHT ausgeführt.** In dieser Umgebung
+existiert kein `OPENAI_API_KEY` und es gibt keinen Netzwerkzugang zu
+`api.openai.com` (HTTP 000). Damit ist die Kernfrage — *"Liefert das System bei
+einem echten Skript ein Thumbnail, das ich sofort hochladen würde?"* —
+**nicht beantwortbar**. Jede gegenteilige Behauptung wäre erfunden. Alles
+unten Genannte ist entsprechend in A/B/C getrennt.
+
+## Konfiguration, die ein echter Lauf verwenden würde
+
+| Position | Wert |
+| --- | --- |
+| Bildmodell | `gpt-image-2.5-sunburst` (Fallback `-flare`, nur mit Protokolleintrag) |
+| Qualität | `max` (MAX-Profil), Leiter `max → xhigh → high` |
+| Größe | `2560x1440` (16:9, beide Kanten durch 16 teilbar) |
+| Kandidaten | 5 Konzepte → 4 Varianten, bis zu 2 Verfeinerungen |
+| Analysemodell | `gpt-6-astra` |
+| Kosten/Lauf (Schätzung) | ca. $4 |
+
+Startbefehl für den manuellen Nachweis, inkl. aller Genres:
+
+```bash
+OPENAI_API_KEY=sk-... TEST_MODE=false QUALITY_MODE=MAX npm run e2e:real -- --all
+```
+
+## A. Durch echte Bildpixel verifiziert
+
+Verifiziert an tatsächlich exportierten Dateien (TEST_MODE-Platzhaltergrafik —
+also **echte Pixel für Satz, Platzierung, Farbe und Export**, aber **kein**
+generiertes Motiv, damit kein Qualitätsurteil über Bildinhalte):
+
+1. **Textplatzierung sitzt nicht mehr auf dem Motiv.** Gemessen am Export:
+   Korrektur `LEFT_TEXT → RIGHT_TEXT`, Überlappung mit dem Blickpunkt **72% → 0%**,
+   Detaildichte im Textbereich 1.14 → 0.24.
+2. **Akzentfarbe kollidiert nicht mehr mit dem Motiv.** Ursache war, dass
+   `stats.dominant` die *häufigste* statt der *auffälligen* Farbe liefert und so
+   den Hintergrund als "Motivfarbe" zurückgab. Ersetzt durch `pickAccentHue()`
+   (gewichtetes Farbton-Histogramm). Gemessen: Akzent wanderte von `hsl(110…)`
+   (exakt das grüne Motiv) auf `hsl(5, 92%, 62%)`.
+3. **Lesbarkeit bei 320x180** an einer heruntergerechneten Datei geprüft:
+   Headline klar lesbar, Zweispaltigkeit erhalten, kein Beschnitt.
+4. **Export** true 16:9, `2560x1440`, unter 2 MB, kein Debug-Overlay.
+
+## B. Nur durch automatisierte Tests verifiziert
+
+- **85 Tests in 12 Dateien, alle grün**; `npx tsc --noEmit` und `npm run build` sauber.
+- `tests/placement.test.ts` (9): Blickpunkterkennung, Überschreiben einer
+  kollidierenden Textfläche, Bestätigung einer guten Fläche, gespiegelter Fall,
+  `allowOverride: false`, Kontrastfläche bei durchgehend unruhigem Bild,
+  Akzentfarbe hält >40° Abstand zu Motiv- und Hintergrundfarbton, Rückfall bei
+  farbloser Grafik.
+- `tests/qualityGate.test.ts` (6, neu): Bei unerreichbarer Schwelle wird der
+  **gesamte Satz abgelehnt** (`REJECTED`/`ALL_CANDIDATES_REJECTED`), es entsteht
+  **bewusst kein** `FINAL_THUMBNAIL`, der `REJECTION_REPORT.json` nennt je
+  Kandidat die Bewertung, die Kandidatenbilder bleiben zur Nachprüfung liegen.
+- Messfehler gefunden und behoben: Die "Unruhe" eines Bereichs wurde bei fester
+  Zielbreite gemessen, wodurch **breite Flächen künstlich ruhig** wirkten. Jetzt
+  einheitliche Abtastdichte; auf gleichmäßigem Rauschen liefern alle Bereiche
+  korrekt ≈1.0 und die Kontrastfläche wird erzwungen.
+
+## C. Nicht verifiziert (ehrliche Lücken)
+
+1. **Alles, was echte Bildinhalte betrifft**: Motivklarheit, Neugier, Emotion,
+   Nicht-Generik, Hintergrundkontrolle, Konzeptvielfalt zwischen vier echten
+   Kandidaten, "wirkt fertig statt KI-Bild mit Text".
+2. **Wirksamkeit der Prompt-Änderungen** (`SUBJECT_SCALE`, Auflösung des
+   Platzierungswiderspruchs). Der behobene Widerspruch war in einer echten
+   `PROMPT_USED.txt` nachweisbar; dass die Bilder dadurch besser werden, ist
+   **nicht** gemessen.
+3. **Bildbasierte Kritik und Rangfolge** durch das Vision-Modell — im TEST_MODE
+   bewertet nur ein Pixelmaß, was ausdrücklich kein Qualitätsurteil ist.
+4. **Verfeinerung verbessert tatsächlich**: Logik und Rückfall auf das Original
+   sind implementiert, aber nie an echten Bildern gemessen.
+5. **Generalisierung über die Genres** — `--all` ist vorbereitet, nie gelaufen.
+6. **Die Abnahmehürde selbst** ("ohne Nacharbeit hochladbar") bleibt offen.
+
+## Absicherungen gegen Selbsttäuschung (neu)
+
+- Im TEST_MODE ist die Qualitätsschwelle **0** und ein Warnhinweis protokolliert,
+  dass der Lauf keine Aussage über Bildqualität trifft; generische/zu-klein-Urteile
+  zählen nur noch aus echten Vision-Kritiken.
+- Jeder Ausgabeordner eines TEST_MODE-Laufs enthält `NICHT_VEROEFFENTLICHEN.txt`,
+  die Metadaten tragen `artwork_is_placeholder` und `publishable: false`.
+- `REJECTED` ist in allen Runnern ein Endzustand und in der Oberfläche sichtbar,
+  inklusive Erklärung, warum bewusst nichts exportiert wurde.
+- Jeder echte Lauf legt `INSPECTION/` mit 640er- und 320er-Ansichten aller
+  Kandidaten und des Endbilds sowie einer Prüffragen-Liste an.

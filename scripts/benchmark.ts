@@ -89,7 +89,7 @@ async function runOne(genre: string, file: string): Promise<Row> {
   const jobId = await new Promise<string>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Timeout')), 1_800_000);
     const onJob = (job: Job) => {
-      if (job.sourceFile === target && ['COMPLETED', 'FAILED', 'WAITING'].includes(job.status)) {
+      if (job.sourceFile === target && ['COMPLETED', 'FAILED', 'WAITING', 'REJECTED'].includes(job.status)) {
         clearTimeout(timeout);
         jobManager.off('job', onJob);
         resolve(job.id);

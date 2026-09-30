@@ -6,6 +6,12 @@ import { charWidthRatio, measureTextWidth } from './measure.js';
 export interface OverlayOptions {
   text: string;
   position: TextPosition;
+  /** Explicit rectangle from the content-aware placement step. */
+  rect?: { left: number; top: number; width: number; height: number };
+  /** Hue that is demonstrably unused in the artwork, so the accent stands out. */
+  accentHue?: number;
+  /** Force the contrast scrim (placement detected an overlap with the subject). */
+  forceBackdrop?: boolean;
   font?: string;
   /** Optional fixed colours; otherwise derived from the artwork. */
   colors?: Partial<TextColors>;
@@ -115,9 +121,14 @@ export async function renderTextOverlay(artwork: Buffer, opts: OverlayOptions): 
   const meta = await sharp(artwork).metadata();
   const width = meta.width ?? 2560;
   const height = meta.height ?? 1440;
-  const rect = safeAreaRect(opts.position, width, height);
+  const rect = opts.rect ?? safeAreaRect(opts.position, width, height);
   const stats = await analyzeRegion(artwork, rect);
-  const colors: TextColors = { ...deriveTextColors(stats), ...opts.colors };
+  const derived = deriveTextColors(stats, undefined, opts.accentHue);
+  const colors: TextColors = {
+    ...derived,
+    useBackdrop: derived.useBackdrop || opts.forceBackdrop === true,
+    ...opts.colors,
+  };
 
   const text = opts.uppercase === false ? opts.text : opts.text.toUpperCase();
   const fontFamily = opts.font ?? 'Inter, "Inter ExtraBold", "Arial Black", "DejaVu Sans", Arial, sans-serif';

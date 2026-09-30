@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import sharp from 'sharp';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { getChannelProfile, getConfig, qualityModeSettings, resolveRequestedQuality } from '../config/index.js';
@@ -20,6 +21,8 @@ import {
   rankCandidatesVisually,
 } from '../ai/critique/imageCritic.js';
 import { findNearDuplicates, runCandidateQa } from '../image/validation/candidateQa.js';
+import { choosePlacement } from '../image/overlay/placement.js';
+import { pickAccentHue } from '../image/overlay/colorAnalysis.js';
 import { formatSize, resolveRequestSize, parseSize as parseApiSize } from '../image/size.js';
 import { renderTextOverlay } from '../image/overlay/textOverlay.js';
 import { makeMobilePreview, normalizeToTarget, parseSize, toJpeg } from '../image/processing/normalize.js';
@@ -63,6 +66,68 @@ async function readReferenceImages(folder: string, limit = 4): Promise<string[]>
   } catch {
     return [];
   }
+}
+
+
+/**
+ * Reject the entire candidate set.
+ *
+ * Deliberately does NOT export a FINAL_THUMBNAIL: a weak image must not look
+ * like a finished deliverable. All candidates and a written report stay on
+ * disk so the failure can be inspected and the job re-run.
+ */
+async function rejectCandidateSet(input: {
+  jobId: string;
+  outputDir: string;
+  variants: GeneratedVariant[];
+  stage: string;
+  summary: string;
+  details: string[];
+  minScore: number;
+}): Promise<Job> {
+  const { jobId, outputDir, variants, stage, summary, details, minScore } = input;
+  const report = {
+    rejected_at: nowIso(),
+    stage,
+    summary,
+    minimum_required_score: minScore,
+    details,
+    candidates: variants.map((v) => ({
+      index: v.index,
+      file: v.file,
+      score: v.critique?.scoreTotal ?? null,
+      critique_source: v.critique?.source ?? null,
+      main_weakness: v.critique?.defects?.[0] ?? v.critique?.reasons?.[0] ?? v.rejectionReason ?? null,
+      local_qa_failed: v.localQa?.checks.filter((c) => !c.passed).map((c) => `${c.name}: ${c.detail}`) ?? [],
+      rejection_reason: v.rejectionReason ?? null,
+    })),
+    note:
+      'Es wurde bewusst kein FINAL_THUMBNAIL exportiert. Ein schwacher Kandidat soll nicht ' +
+      'dadurch zum "besten" werden, dass die anderen noch schwächer sind.',
+  };
+  try {
+    await fsp.mkdir(outputDir, { recursive: true });
+    await fsp.writeFile(path.join(outputDir, 'REJECTION_REPORT.json'), JSON.stringify(report, null, 2));
+  } catch (err) {
+    logger.warn('Ablehnungsbericht konnte nicht geschrieben werden', {
+      job_id: jobId, stage, error: (err as Error).message,
+    });
+  }
+
+  logger.error(`${summary} ${details.join(' ')}`, { job_id: jobId, stage, success: false });
+
+  return jobManager.setStatus(jobId, 'REJECTED', {
+    variants,
+    rejectedCount: variants.length,
+    estimatedCostUsd: costTracker.jobTotal(jobId),
+    error: {
+      message: `${summary} ${details.join(' ')}`.trim(),
+      stage,
+      code: 'ALL_CANDIDATES_REJECTED',
+      permanent: false,
+      at: nowIso(),
+    },
+  });
 }
 
 /** Create (or reuse) the job record for a script file, with duplicate detection. */
@@ -110,6 +175,17 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
   const requestedQuality = resolveRequestedQuality(cfg);
   const quality = requestedQuality.quality;
   const sizeResolution = resolveRequestSize(parseApiSize(cfg.resolution));
+  // TEST_MODE cannot judge visual quality: its "scores" are pixel measurements of
+  // placeholder artwork. Gating on them would be a fake quality statement, so the
+  // gate is disabled unless a threshold is set explicitly.
+  const minAcceptableScore = cfg.minThumbnailScore ?? (cfg.testMode ? 0 : modeSettings.minAcceptableScore);
+  if (minAcceptableScore === 0) {
+    logger.warn(
+      'Qualitäts-Schwelle deaktiviert (TEST_MODE oder MIN_THUMBNAIL_SCORE=0): ' +
+        'das Ergebnis dieses Laufs ist keine Aussage über Bildqualität.',
+      { job_id: jobId, stage: 'quality_gate' },
+    );
+  }
   const requestSize = formatSize(sizeResolution.size);
   const variantCount = Math.max(1, Math.min(cfg.maxVariantCount, cfg.testMode ? cfg.variantCount : Math.min(modeSettings.variants, cfg.variantCount || modeSettings.variants)));
 
@@ -325,23 +401,23 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
         .join('; ')}`;
     }
 
-    // Never throw everything away: if the gate rejects all candidates, keep the
-    // least-bad one and say so, instead of failing the job silently.
-    let survivors = variants.filter((v) => !v.rejected);
+    // A weak candidate must not become "the best" just because the others are
+    // worse. If nothing survives Stage 1, the whole set is rejected.
+    const survivors = variants.filter((v) => !v.rejected);
+    const rejectedCount = variants.filter((v) => v.rejected).length;
     if (!survivors.length && variants.length) {
-      const bestFallback = [...variants].sort(
-        (a, b) =>
-          (b.localQa?.checks.filter((c) => c.passed).length ?? 0) -
-          (a.localQa?.checks.filter((c) => c.passed).length ?? 0),
-      )[0];
-      bestFallback.rejected = false;
-      bestFallback.rejectionReason = undefined;
-      survivors = [bestFallback];
-      logger.warn('Alle Kandidaten haben die lokale Qualitätsprüfung nicht bestanden – bester Kandidat wird trotzdem verwendet.', {
-        job_id: jobId, stage: 'candidate_qa', success: false,
+      return await rejectCandidateSet({
+        jobId,
+        outputDir,
+        variants,
+        stage: 'candidate_qa',
+        summary: 'Kein einziger Kandidat hat die lokale Qualitätsprüfung bestanden.',
+        details: variants.map(
+          (v) => `Kandidat ${v.index}: ${v.rejectionReason ?? 'ohne Begründung'}`,
+        ),
+        minScore: minAcceptableScore,
       });
     }
-    const rejectedCount = variants.filter((v) => v.rejected).length;
 
     // ---------- 5. Stage-2 AI critique on the actual pixels ----------
     for (const variant of survivors) {
@@ -410,6 +486,43 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
       }
     }
     let selected = survivors.find((v) => v.index === selection.selectedIndex) ?? survivors[0];
+
+    // Honest quality gate: if even the winner is weak, do not present it as a
+    // finished thumbnail. Everything stays on disk for inspection.
+    const scored = survivors.filter((v) => v.critique);
+    // Only a real vision judgement may declare a set "generic" — a mock verdict
+    // must never reject real work, and must never pass as a quality statement.
+    const judgedByVision = scored.filter((v) => v.critique!.source === 'vision-model');
+    if (scored.length) {
+      const bestScore = Math.max(...scored.map((v) => v.critique!.scoreTotal));
+      const allGeneric = judgedByVision.length > 0 && judgedByVision.every((v) => v.critique!.feelsGeneric);
+      const noneUsableSmall = judgedByVision.length > 0 && judgedByVision.every((v) => !v.critique!.smallSizeReadable);
+      if ((minAcceptableScore > 0 && bestScore < minAcceptableScore) || allGeneric || noneUsableSmall) {
+        const why: string[] = [];
+        if (bestScore < minAcceptableScore) {
+          why.push(`Bester Bewertungswert ${bestScore.toFixed(2)} liegt unter der Mindestschwelle ${minAcceptableScore.toFixed(2)}.`);
+        }
+        if (allGeneric) why.push('Die Bildkritik hält jeden Kandidaten für generisch wirkend.');
+        if (noneUsableSmall) why.push('Kein Kandidat ist in der 320px-Feed-Ansicht lesbar.');
+        return await rejectCandidateSet({
+          jobId,
+          outputDir,
+          variants,
+          stage: 'quality_gate',
+          summary: 'Kein Kandidat erreicht die Qualitätsschwelle – es wird bewusst kein Thumbnail zum Upload angeboten.',
+          details: [
+            ...why,
+            ...scored.map((v) => {
+              const c = v.critique!;
+              const weakness = c.defects[0] ?? c.reasons[0] ?? c.summary;
+              return `Kandidat ${v.index}: ${c.scoreTotal.toFixed(2)} – Hauptschwäche: ${weakness}`;
+            }),
+          ],
+          minScore: minAcceptableScore,
+        });
+      }
+    }
+
     const selectedConcept = chosenConcepts.find((c) => c.id === selected.conceptId) ?? chosenConcepts[0];
 
     // ---------- 6b. Targeted refinement passes (re-evaluated every time) ----------
@@ -485,8 +598,13 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
           size: improved.size, count: 1, estimatedUsd: estimateImageCost(improved.model, improved.quality, 1, improved.size),
         });
 
-        // Keep the refinement only if it actually got better.
-        if (refinedCritique.scoreTotal > critique.scoreTotal) {
+        // Keep the refinement only if it is better on BOTH axes: the critic's
+        // score must rise and the deterministic QA must not regress.
+        const qaBefore = selected.localQa?.checks.filter((c) => c.passed).length ?? 0;
+        const qaAfter = refinedQa.checks.filter((c) => c.passed).length;
+        const scoreImproved = refinedCritique.scoreTotal > critique.scoreTotal;
+        const qaHeld = qaAfter >= qaBefore;
+        if (scoreImproved && qaHeld) {
           await fsp.writeFile(selected.file, normalized);
           await fsp.writeFile(selected.file.replace(/\.png$/, '.jpg'), await toJpeg(normalized, 90));
           const updated: GeneratedVariant = {
@@ -503,9 +621,12 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
             job_id: jobId, stage: 'refinement', model: improved.model, success: true,
           });
         } else {
-          logger.info(`Verfeinerung ${pass + 1} verworfen (${refinedCritique.scoreTotal.toFixed(2)} <= ${critique.scoreTotal.toFixed(2)})`, {
-            job_id: jobId, stage: 'refinement', success: true,
-          });
+          logger.info(
+            `Verfeinerung ${pass + 1} verworfen – Original bleibt ` +
+              `(Score ${critique.scoreTotal.toFixed(2)} -> ${refinedCritique.scoreTotal.toFixed(2)}, ` +
+              `lokale QA ${qaBefore} -> ${qaAfter} bestandene Prüfungen)`,
+            { job_id: jobId, stage: 'refinement', success: true },
+          );
           break;
         }
       } catch (err) {
@@ -536,11 +657,28 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
 
     let finalPng: Buffer = cleanArt;
     const wantsOverlay = cfg.textMode === 'LOCAL_OVERLAY' || cfg.textMode === 'BOTH_FOR_COMPARISON';
+
+    // The concept proposes a text area, the actual image decides. Without this
+    // the headline can land straight on the subject's face.
+    const preferredArea = cfg.textPosition === 'AUTO' ? selectedConcept.textArea : cfg.textPosition;
+    const placement = await choosePlacement(cleanArt, preferredArea, {
+      allowOverride: cfg.textPosition === 'AUTO',
+    });
+    logger.info(placement.reason, {
+      job_id: jobId,
+      stage: 'text_placement',
+      success: true,
+    });
+    const accentHue = await pickAccentHue(cleanArt);
+
     if (wantsOverlay) {
       try {
         const overlay = await renderTextOverlay(cleanArt, {
           text: thumbnailText,
-          position: cfg.textPosition === 'AUTO' ? selectedConcept.textArea : cfg.textPosition,
+          position: placement.position,
+          rect: placement.rect,
+          accentHue,
+          forceBackdrop: placement.needsBackdrop,
           font: cfg.font,
         });
         finalPng = overlay.image;
@@ -586,7 +724,7 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
       cleanArt,
       targetSize: cfg.resolution,
       expectText: wantsOverlay,
-      textPosition: cfg.textPosition === 'AUTO' ? selectedConcept.textArea : cfg.textPosition,
+      textPosition: placement.position,
       mobilePreviewPath: mobilePath,
     });
 
@@ -639,6 +777,20 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
       estimated_cost_usd: costTracker.jobTotal(jobId),
       cost_is_estimate: true,
       test_mode: cfg.testMode,
+      // Explizite Kennzeichnung: im TEST_MODE ist die Bildfläche ein Platzhalter
+      // und darf niemals als fertiges Thumbnail veröffentlicht werden.
+      artwork_is_placeholder: cfg.testMode,
+      publishable: !cfg.testMode,
+      not_publishable_reason: cfg.testMode
+        ? 'TEST_MODE: Die Bildfläche ist synthetische Platzhalter-Grafik, kein generiertes Motiv.'
+        : null,
+      text_placement: {
+        position: placement.position,
+        reason: placement.reason,
+        focal_overlap: placement.scores.find((x) => x.position === placement.position)?.focalOverlap ?? null,
+        backdrop_forced: placement.needsBackdrop,
+        candidates: placement.scores,
+      },
       qa,
       script_analysis: analysis!,
       concepts,
@@ -646,6 +798,18 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
       error_information: null,
     };
     await fsp.writeFile(path.join(outputDir, 'THUMBNAIL_ANALYSIS.json'), JSON.stringify(metadata, null, 2));
+    if (cfg.testMode) {
+      // Unübersehbare Markierung im Ausgabeordner: ein Platzhalter darf nicht
+      // versehentlich als fertiges Thumbnail hochgeladen werden.
+      await fsp.writeFile(
+        path.join(outputDir, 'NICHT_VEROEFFENTLICHEN.txt'),
+        'TEST_MODE-Lauf.\n\n' +
+          'Die Bildfläche ist synthetische Platzhalter-Grafik, kein generiertes Motiv.\n' +
+          'Textsatz, Platzierung und Export sind echt, das Bild ist es nicht.\n' +
+          'Für ein veröffentlichbares Thumbnail: TEST_MODE=false und gültigen OPENAI_API_KEY setzen.\n',
+        'utf8',
+      );
+    }
     await fsp.writeFile(
       path.join(outputDir, 'PROMPT_USED.txt'),
       formatPromptFile({

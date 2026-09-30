@@ -13,6 +13,7 @@ export const STAGE_LABELS: Record<JobStatus, string> = {
   FINALIZING: 'Finalisierung läuft',
   COMPLETED: 'Fertig',
   FAILED: 'Fehlgeschlagen',
+  REJECTED: 'Verworfen (kein Kandidat gut genug)',
   SKIPPED_DUPLICATE: 'Übersprungen (bereits verarbeitet)',
   WAITING: 'Wartet (Provider nicht erreichbar)',
 };

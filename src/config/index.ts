@@ -82,6 +82,7 @@ function envConfig(): AppConfig {
     qualityMode: (process.env.QUALITY_MODE as QualityMode) || 'BALANCED',
     variantCount: num(process.env.VARIANT_COUNT, 4),
     maxVariantCount: num(process.env.MAX_VARIANT_COUNT, 6),
+    minThumbnailScore: process.env.MIN_THUMBNAIL_SCORE ? num(process.env.MIN_THUMBNAIL_SCORE, 0) : undefined,
     maxCostPerJob: num(process.env.MAX_COST_PER_JOB, 8),
     maxDailyCost: num(process.env.MAX_COST_PER_DAY, 40),
     inputFolder: resolveFolder(process.env.INPUT_FOLDER, 'data/workspace/Scripts/Incoming'),
@@ -183,6 +184,12 @@ export interface QualityProfile {
   allowQualityFallback: boolean;
   /** May the provider switch to the fallback image model? */
   allowModelFallback: boolean;
+  /**
+   * Minimum critic score the winning candidate must reach. If no candidate
+   * clears this bar, the whole set is rejected instead of confidently
+   * presenting the least-bad image.
+   */
+  minAcceptableScore: number;
   /** Human readable description shown in the UI. */
   description: string;
 }
@@ -199,6 +206,7 @@ export function qualityModeSettings(mode: QualityMode): QualityProfile {
         premium: false,
         allowQualityFallback: true,
         allowModelFallback: true,
+        minAcceptableScore: 5.0,
         description: 'Geschwindigkeit vor Maximalqualität: weniger Kandidaten, Qualitätsstufe "high", Modellwechsel erlaubt.',
       };
     case 'MAX':
@@ -211,6 +219,7 @@ export function qualityModeSettings(mode: QualityMode): QualityProfile {
         premium: true,
         allowQualityFallback: false,
         allowModelFallback: false,
+        minAcceptableScore: 6.5,
         description: 'Premium: Sunburst mit Qualität "max", volle visuelle Bewertung, ein gezielter Refinement-Pass. Keine stillen Abstufungen.',
       };
     default:
@@ -223,6 +232,7 @@ export function qualityModeSettings(mode: QualityMode): QualityProfile {
         premium: true,
         allowQualityFallback: false,
         allowModelFallback: false,
+        minAcceptableScore: 6.0,
         description: 'Hohe Qualität: Sunburst mit Qualität "xhigh", volle visuelle Bewertung. Keine stillen Abstufungen.',
       };
   }
