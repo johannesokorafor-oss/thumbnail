@@ -73,6 +73,13 @@ export interface CandidateQaOptions {
   textArea: TextPosition;
   /** Reject rather than warn (Stage 1 gate). */
   strict?: boolean;
+  /**
+   * 'artwork'  — bare generated image: the text area must still be free.
+   * 'composite'— artwork plus headline: the text is SUPPOSED to be the detail
+   *              in that area, so the free-area check is replaced by a
+   *              legibility check (contrast of the type against its backdrop).
+   */
+  mode?: 'artwork' | 'composite';
 }
 
 /**
@@ -119,16 +126,46 @@ export async function runCandidateQa(opts: CandidateQaOptions): Promise<Candidat
     detail: `Mittlere Helligkeit ${global.mean.toFixed(1)} (weder abgesoffen noch ausgebrannt).`,
   });
 
-  // --- Safe area must be calm enough for a headline -------------------------
+  // --- Text area ------------------------------------------------------------
+  const mode = opts.mode ?? 'artwork';
   const rect = safeAreaRect(opts.textArea, width, height);
   const safeEnergy = await edgeEnergy(opts.image, rect);
   const fullEnergy = await edgeEnergy(opts.image);
   const busyness = fullEnergy > 0 ? safeEnergy / fullEnergy : 1;
-  checks.push({
-    name: 'text_safe_area',
-    passed: busyness <= 1.05,
-    detail: `Detaildichte im Textbereich ${busyness.toFixed(2)}x des Bildmittels (Grenze 1.05).`,
-  });
+  if (mode === 'artwork') {
+    checks.push({
+      name: 'text_safe_area',
+      passed: busyness <= 1.05,
+      detail: `Detaildichte im Textbereich ${busyness.toFixed(2)}x des Bildmittels (Grenze 1.05).`,
+    });
+  } else {
+    // Measured at 320px width: if the headline still separates from its
+    // background there, it is legible in a feed.
+    const small = await sharp(opts.image)
+      .resize(320, 180, { fit: 'cover' })
+      .greyscale()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const sx = Math.floor((rect.left / width) * small.info.width);
+    const sy = Math.floor((rect.top / height) * small.info.height);
+    const sw = Math.max(1, Math.floor((rect.width / width) * small.info.width));
+    const sh = Math.max(1, Math.floor((rect.height / height) * small.info.height));
+    const values: number[] = [];
+    for (let y = sy; y < Math.min(sy + sh, small.info.height); y++) {
+      for (let x = sx; x < Math.min(sx + sw, small.info.width); x++) {
+        values.push(small.data[y * small.info.width + x]);
+      }
+    }
+    values.sort((a, b) => a - b);
+    const lo = values[Math.floor(values.length * 0.05)] ?? 0;
+    const hi = values[Math.floor(values.length * 0.95)] ?? 255;
+    const contrast = hi - lo;
+    checks.push({
+      name: 'text_legibility_small',
+      passed: contrast >= 60,
+      detail: `Kontrastumfang der Textzone bei 320px: ${contrast} Stufen (Minimum 60).`,
+    });
+  }
 
   // --- Subject separation: detail must concentrate somewhere ----------------
   const cols = 3;

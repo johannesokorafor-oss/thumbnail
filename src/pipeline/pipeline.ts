@@ -21,7 +21,7 @@ import {
   rankCandidatesVisually,
 } from '../ai/critique/imageCritic.js';
 import { findNearDuplicates, runCandidateQa } from '../image/validation/candidateQa.js';
-import { choosePlacement } from '../image/overlay/placement.js';
+import { choosePlacement, type PlacementResult } from '../image/overlay/placement.js';
 import { pickAccentHue } from '../image/overlay/colorAnalysis.js';
 import { formatSize, resolveRequestSize, parseSize as parseApiSize } from '../image/size.js';
 import { renderTextOverlay } from '../image/overlay/textOverlay.js';
@@ -164,6 +164,69 @@ export function registerScript(filePath: string, force = false): { job?: Job; sk
 }
 
 /** The full pipeline (section 43). */
+/**
+ * Artwork + headline -> the image the viewer actually sees.
+ *
+ * Used for every candidate (so critique, ranking and small-size QA judge the
+ * final composite, not the bare artwork) and again for the winner's export.
+ */
+async function composeCandidate(opts: {
+  art: Buffer;
+  text: string;
+  preferredArea: string;
+  allowOverride: boolean;
+  withText: boolean;
+  font: string;
+}): Promise<{ image: Buffer; placement: PlacementResult; accentHue: number }> {
+  const placement = await choosePlacement(opts.art, opts.preferredArea as never, {
+    allowOverride: opts.allowOverride,
+  });
+  const accentHue = await pickAccentHue(opts.art);
+  let image = opts.art;
+  if (opts.withText && opts.text) {
+    const overlay = await renderTextOverlay(opts.art, {
+      text: opts.text,
+      position: placement.position,
+      rect: placement.rect,
+      accentHue,
+      forceBackdrop: placement.needsBackdrop,
+      font: opts.font,
+    });
+    image = overlay.image;
+  }
+  return { image, placement, accentHue };
+}
+
+/**
+ * Inspection views for human review (Phase 14). A thumbnail that only works at
+ * full resolution is not a working thumbnail, so every candidate composite and
+ * the final export are written at feed sizes too.
+ */
+async function writeInspectionViews(
+  outputDir: string,
+  entries: Array<{ label: string; image: Buffer }>,
+): Promise<string> {
+  const dir = path.join(outputDir, 'INSPECTION');
+  await fsp.mkdir(dir, { recursive: true });
+  for (const { label, image } of entries) {
+    for (const width of [1280, 640, 320] as const) {
+      await sharp(image)
+        .resize(width, Math.round((width * 9) / 16), { fit: 'cover' })
+        .jpeg({ quality: 90 })
+        .toFile(path.join(dir, `${label}_${width}.jpg`));
+    }
+  }
+  await fsp.writeFile(
+    path.join(dir, 'README.txt'),
+    'Sichtprüfung bei Anzeigegrößen.\n\n' +
+      'FINAL_* ist das exportierte Thumbnail, VARIANT_*_COMPOSITE die Mitbewerber.\n' +
+      'Bei 320x180 prüfen: Motiv sofort erkennbar? Gesicht lesbar? Text lesbar?\n' +
+      'Hierarchie klar? Kontrast erhalten? Bild wirkt nicht flach?\n',
+    'utf8',
+  );
+  return dir;
+}
+
 export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise<Job> {
   const cfg = getConfig();
   const profile = getChannelProfile();
@@ -346,7 +409,7 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
         textArea: concept.textArea,
       });
 
-      variants.push({
+      const variant: GeneratedVariant = {
         index, conceptId: concept.id, file, prompt,
         model: image.model, quality: image.quality, size: `${targetSize.width}x${targetSize.height}`,
         requested: image.requested,
@@ -354,12 +417,49 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
         latencyMs: image.latencyMs,
         localQa,
         iteration: 1,
-      });
+      };
+      variants.push(variant);
       logger.info(`Variante ${index} generiert`, {
         job_id: jobId, stage: 'image_generation', model: image.model,
         quality: image.quality, size: image.size,
         duration_ms: Date.now() - t0, success: true,
       });
+      // Compose the headline onto THIS candidate so every later judgement
+      // (critique, ranking, small-size QA) sees the real thumbnail.
+      const wantsOverlayNow = cfg.textMode === 'LOCAL_OVERLAY' || cfg.textMode === 'BOTH_FOR_COMPARISON';
+      try {
+        const candidateText = (concept.thumbnailText || analysis!.THUMBNAIL_TEXT_CANDIDATES[0] || '').toUpperCase();
+        const composed = await composeCandidate({
+          art: normalized,
+          text: candidateText,
+          preferredArea: cfg.textPosition === 'AUTO' ? concept.textArea : cfg.textPosition,
+          allowOverride: cfg.textPosition === 'AUTO',
+          withText: wantsOverlayNow,
+          font: cfg.font,
+        });
+        const compositeFile = file.replace(/\.png$/, '_COMPOSITE.png');
+        await fsp.writeFile(compositeFile, composed.image);
+        variant.compositeFile = compositeFile;
+        variant.placement = {
+          position: composed.placement.position,
+          reason: composed.placement.reason,
+          focalOverlap:
+            composed.placement.scores.find((x) => x.position === composed.placement.position)?.focalOverlap ?? null,
+          backdropForced: composed.placement.needsBackdrop,
+        };
+        // Small-size behaviour of the composite is the decisive readability test.
+        variant.compositeQa = await runCandidateQa({
+          image: composed.image,
+          targetSize: `${targetSize.width}x${targetSize.height}`,
+          textArea: composed.placement.position,
+          mode: 'composite',
+        });
+      } catch (err) {
+        logger.warn(`Komposition für Variante ${index} fehlgeschlagen – bewerte das Artwork`, {
+          job_id: jobId, stage: 'overlay', error: (err as Error).message,
+        });
+      }
+
       if (!localQa.passed) {
         logger.warn(
           `Variante ${index} scheitert an der lokalen Qualitätsprüfung: ${localQa.checks.filter((c) => !c.passed).map((c) => c.name).join(', ')}`,
@@ -427,7 +527,9 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
         costTracker.assertWithinBudget(jobId, ANALYSIS_CALL_ESTIMATE);
         variant.critique = await critiqueVariant({
           provider: textProvider,
-          imagePath: variant.file,
+          // The composite is what a viewer sees — judging the bare artwork
+          // would rate a picture nobody ever gets shown.
+          imagePath: variant.compositeFile ?? variant.file,
           concept,
           analysis: analysis!,
           jobId,
@@ -457,7 +559,7 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
           const c = chosenConcepts.find((x) => x.id === v.conceptId);
           return {
             index: v.index,
-            file: v.file,
+            file: v.compositeFile ?? v.file,
             conceptLabel: c?.label ?? v.conceptId,
             strategy: c?.strategy ?? 'UNBEKANNT',
           };
@@ -584,13 +686,31 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
         const refinedFile = selected.file.replace(/\.png$/, `_refined${pass + 1}.png`);
         await fsp.writeFile(refinedFile, normalized);
 
+        const refinedComposite = await (async () => {
+          try {
+            const composed = await composeCandidate({
+              art: normalized,
+              text: (selectedConcept.thumbnailText || analysis!.THUMBNAIL_TEXT_CANDIDATES[0] || '').toUpperCase(),
+              preferredArea: cfg.textPosition === 'AUTO' ? selectedConcept.textArea : cfg.textPosition,
+              allowOverride: cfg.textPosition === 'AUTO',
+              withText: cfg.textMode === 'LOCAL_OVERLAY' || cfg.textMode === 'BOTH_FOR_COMPARISON',
+              font: cfg.font,
+            });
+            const f = refinedFile.replace(/\.png$/, '_COMPOSITE.png');
+            await fsp.writeFile(f, composed.image);
+            return { file: f, placement: composed.placement };
+          } catch {
+            return undefined;
+          }
+        })();
+
         const refinedQa = await runCandidateQa({
           image: normalized,
           targetSize: `${targetSize.width}x${targetSize.height}`,
           textArea: selectedConcept.textArea,
         });
         const refinedCritique = await critiqueVariant({
-          provider: textProvider, imagePath: refinedFile, concept: selectedConcept,
+          provider: textProvider, imagePath: refinedComposite?.file ?? refinedFile, concept: selectedConcept,
           analysis: analysis!, jobId, depth: modeSettings.critique,
         });
         costTracker.record({
@@ -611,6 +731,18 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
             ...selected,
             critique: refinedCritique,
             localQa: refinedQa,
+            compositeFile: refinedComposite?.file ?? selected.compositeFile,
+            placement: refinedComposite
+              ? {
+                  position: refinedComposite.placement.position,
+                  reason: refinedComposite.placement.reason,
+                  focalOverlap:
+                    refinedComposite.placement.scores.find(
+                      (x) => x.position === refinedComposite.placement.position,
+                    )?.focalOverlap ?? null,
+                  backdropForced: refinedComposite.placement.needsBackdrop,
+                }
+              : selected.placement,
             iteration: selected.iteration + 1,
             refined: true,
           };
@@ -718,6 +850,25 @@ export async function runPipeline(jobId: string, opts: RunOptions = {}): Promise
     const mobile = await makeMobilePreview(finalPng, 320);
     const mobilePath = path.join(outputDir, 'MOBILE_PREVIEW.jpg');
     await fsp.writeFile(mobilePath, mobile);
+
+    const inspectionEntries: Array<{ label: string; image: Buffer }> = [
+      { label: 'FINAL', image: finalPng },
+    ];
+    for (const v of variants) {
+      if (v.index === selected.index || !v.compositeFile) continue;
+      try {
+        inspectionEntries.push({
+          label: `VARIANT_${String(v.index).padStart(2, '0')}`,
+          image: await fsp.readFile(v.compositeFile),
+        });
+      } catch {
+        /* a missing candidate file must not break the export */
+      }
+    }
+    const inspectionDir = await writeInspectionViews(outputDir, inspectionEntries);
+    logger.info(`Sichtprüfungs-Ansichten geschrieben (1280/640/320): ${inspectionDir}`, {
+      job_id: jobId, stage: 'inspection', success: true,
+    });
 
     const qa = await runQualityAssurance({
       finalImage: finalPng,

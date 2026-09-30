@@ -198,8 +198,21 @@ export interface GeneratedVariant {
   requested?: { model: string; quality: string; size: string };
   degradations?: Array<{ kind: string; requested: string; actual: string; reason: string }>;
   latencyMs?: number;
-  /** Stage 1: deterministic local QA. */
+  /** Stage 1: deterministic local QA on the bare artwork. */
   localQa?: CandidateQaReport;
+  /**
+   * The composed thumbnail (artwork + headline) for this candidate. This — not
+   * the bare artwork — is what the viewer sees, so it is what gets critiqued,
+   * ranked and checked at small size.
+   */
+  compositeFile?: string;
+  compositeQa?: CandidateQaReport;
+  placement?: {
+    position: string;
+    reason: string;
+    focalOverlap: number | null;
+    backdropForced: boolean;
+  };
   /** Stage 2: AI critique on the real pixels (only for Stage-1 survivors). */
   critique?: VariantCritique;
   /** Set when the candidate was excluded from the final competition. */
