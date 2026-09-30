@@ -96,3 +96,44 @@ Ehrliche Gesamteinschätzung: Die **Entscheidungsmechanik** ist jetzt
 nachweislich korrekt — sie bewertet das richtige Bild, mit Prüfungen, die
 tatsächlich unterscheiden, und sie kann alles ablehnen. Ob die **Bilder** gut
 sind, ist ohne API-Schlüssel nicht feststellbar und wird hier nicht behauptet.
+
+---
+
+## Übernahme-Verifikation (2026-09-30, zweiter Durchgang)
+
+Der Arbeitsstand wurde bei Sitzungsbeginn auf den Initial-Commit zurückgesetzt
+vorgefunden (`git log` zeigte nur `52f63a2 (grafted)`), während der Arbeitsbaum
+die neueste Arbeit noch enthielt. Über `origin/arena/01a0eea1-thumbnail` wurde
+der Index auf `7a6e31e` zurückgesetzt; der Arbeitsbaum stimmte danach exakt mit
+dem gepushten Stand überein (0 abweichende Dateien). **Kein Codeverlust.**
+
+Gegen den tatsächlichen Code geprüft, nicht gegen Berichte:
+
+| Behauptung | Prüfung | Ergebnis |
+| --- | --- | --- |
+| Kritik bewertet das Gesamtbild | `imagePath: variant.compositeFile ?? variant.file` (Zeile 532) | bestätigt |
+| Verfeinerung bewertet das Gesamtbild | `refinedComposite?.file ?? refinedFile` (Zeile 713) | bestätigt |
+| Ranking vergleicht Gesamtbilder | `file: v.compositeFile ?? v.file` (Zeile 562) | bestätigt |
+| Kleinbild-QA am Gesamtbild | `mode: 'composite'` (Zeile 455) | bestätigt |
+| `text_safe_area` nur am Artwork | `if (mode === 'artwork')` (candidateQa Zeile 135) | bestätigt |
+| `1920x1080` wird abgelehnt | `tests/size.test.ts` prüft genau das | bestätigt |
+| MAX/BALANCED ohne stille Rückstufung | `allowQualityFallback/allowModelFallback: false` in beiden Profilen, nur FAST erlaubt sie | bestätigt |
+| TEST_MODE nicht veröffentlichbar | `publishable: !cfg.testMode`, `NICHT_VEROEFFENTLICHEN.txt` | bestätigt |
+
+**Gefundene Lücke:** Die Composite-First-Verdrahtung selbst war durch keinen
+Test geschützt — `tests/composite.test.ts` prüfte nur die QA-Modi isoliert. Ein
+Rückbau auf `variant.file` wäre unbemerkt durchgegangen, also genau der Fehler,
+der schon einmal passiert ist. Geschlossen durch `tests/compositeFirst.test.ts`
+(8 Tests): Gesamtbild je Kandidat vorhanden, **messbar verschieden vom
+Artwork** (sonst liefe die Bewertung faktisch weiter am Artwork),
+Lesbarkeitsprüfung statt Freiflächenprüfung, Platzierung je Kandidat begründet,
+Ansichten bei 1280/640/320 inklusive unterlegener Kandidaten, 320er-Ansicht
+wirklich 320x180, TEST_MODE als nicht veröffentlichbar markiert.
+
+Ergänzt: Der Ablehnungsbericht nennt jetzt `evaluated_file`, die Platzierung
+und fehlgeschlagene Gesamtbild-Prüfungen je Kandidat — die Ablehnung ist damit
+am selben Bild nachvollziehbar, das bewertet wurde.
+
+Teststand: **98 Tests in 14 Dateien, alle grün**; `tsc --noEmit` und Build sauber.
+Unverändert offen bleibt alles aus „Was weiterhin unbelegt bleibt" — ohne
+API-Schlüssel ist keine Aussage über echte Bildqualität möglich.

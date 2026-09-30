@@ -95,6 +95,12 @@ async function rejectCandidateSet(input: {
     candidates: variants.map((v) => ({
       index: v.index,
       file: v.file,
+      // Das beurteilte Bild ist das Gesamtbild — es gehört in den Bericht,
+      // damit die Ablehnung am selben Bild nachvollzogen werden kann.
+      evaluated_file: v.compositeFile ?? v.file,
+      placement: v.placement ?? null,
+      composite_qa_failed:
+        v.compositeQa?.checks.filter((c) => !c.passed).map((c) => `${c.name}: ${c.detail}`) ?? [],
       score: v.critique?.scoreTotal ?? null,
       critique_source: v.critique?.source ?? null,
       main_weakness: v.critique?.defects?.[0] ?? v.critique?.reasons?.[0] ?? v.rejectionReason ?? null,
